@@ -2,17 +2,46 @@ import getopt
 import sys
 import time
 import base64
+import os
 from threading import Thread
 from datetime import timedelta
 
 from printer import PrinterData
 from lcd import LCD, _printerData
 
+
+def _env_int(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_float(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 class KlipperLCD ():
     def __init__(self):
-        self.lcd = LCD("/dev/ttyAMA0", callback=self.lcd_callback)
+        self.lcd_port = os.getenv("KLIPPERLCD_LCD_PORT", "/dev/ttyAMA0")
+        self.lcd_baud = _env_int("KLIPPERLCD_LCD_BAUDRATE", 115200)
+        self.api_key = os.getenv("KLIPPERLCD_API_KEY", "XXXXXX")
+        self.moonraker_url = os.getenv("KLIPPERLCD_MOONRAKER_URL", "127.0.0.1")
+        self.klippy_sock = os.getenv("KLIPPERLCD_KLIPPY_SOCK", "/home/pi/printer_data/comms/klippy.sock")
+        self.update_interval = _env_float("KLIPPERLCD_UPDATE_INTERVAL", 2.0)
+
+        self.lcd = LCD(self.lcd_port, baud=self.lcd_baud, callback=self.lcd_callback)
         self.lcd.start()
-        self.printer = PrinterData('XXXXXX', URL=("127.0.0.1"), klippy_sock='/home/pi/printer_data/comms/klippy.sock', callback=self.printer_callback)
+        self.printer = PrinterData(self.api_key, URL=(self.moonraker_url), klippy_sock=self.klippy_sock, callback=self.printer_callback)
         self.running = False
         self.wait_probe = False
         self.thumbnail_inprogress = False
@@ -76,7 +105,7 @@ class KlipperLCD ():
 
             self.lcd.data_update(data)
                 
-            time.sleep(2)
+            time.sleep(self.update_interval)
 
     def printer_callback(self, data, data_type):
         msg = self.lcd.format_console_data(data, data_type)
@@ -220,6 +249,10 @@ class KlipperLCD ():
         else:
             print("lcd_callback event not recognised %d" % evt)
 
-if __name__ == "__main__":
+def run():
     x = KlipperLCD()
     x.start()
+
+
+if __name__ == "__main__":
+    run()

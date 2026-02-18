@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klipperlcd"
+version = "0.1.0"
+description = "KlipperLCD service for Elegoo Neptune 3 Pro LCD"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "KlipperLCD contributors" }
+]
+dependencies = [
+  "requests>=2.31.0",
+  "pyserial>=3.5",
+  "Pillow>=10.0.0"
+]
+
+[project.scripts]
+klipperlcd = "main:run"
+
+[tool.setuptools]
+py-modules = ["main", "lcd", "printer", "lib_col_pic"]
