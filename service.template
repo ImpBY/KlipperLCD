@@ -8,9 +8,13 @@ StartLimitBurst=15
 [Service]
 Type=simple
 User=__SERVICE_USER__
+PermissionsStartOnly=true
 EnvironmentFile=-/home/__SERVICE_USER__/.config/__REPO_NAME__/service.env
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/usr/bin/mkdir -p /home/__SERVICE_USER__/printer_data/logs
+ExecStartPre=/usr/bin/touch /home/__SERVICE_USER__/printer_data/logs/__REPO_NAME__.log
+ExecStartPre=/usr/bin/chown __SERVICE_USER__:__SERVICE_USER__ /home/__SERVICE_USER__/printer_data/logs/__REPO_NAME__.log
+ExecStartPre=/usr/bin/chmod 660 /home/__SERVICE_USER__/printer_data/logs/__REPO_NAME__.log
 ExecStartPre=/usr/bin/test -x /home/__SERVICE_USER__/__REPO_NAME__-venv/bin/klipperlcd
 ExecStart=/home/__SERVICE_USER__/__REPO_NAME__-venv/bin/klipperlcd
 Restart=on-failure
@@ -18,7 +22,7 @@ RestartSec=2
 TimeoutStartSec=30
 TimeoutStopSec=20
 KillSignal=SIGINT
-UMask=0027
+UMask=0007
 StandardOutput=append:/home/__SERVICE_USER__/printer_data/logs/__REPO_NAME__.log
 StandardError=append:/home/__SERVICE_USER__/printer_data/logs/__REPO_NAME__.log
 

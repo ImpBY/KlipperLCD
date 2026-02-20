@@ -8,6 +8,8 @@ import errno
 import asyncio
 import atexit
 import json
+import logging
+import binascii
 import select
 import socket
 import threading
@@ -15,7 +17,21 @@ import time
 
 import requests
 from json import JSONDecodeError
-from requests.exceptions import ConnectionError
+from requests.exceptions import ConnectionError, RequestException
+
+logger = logging.getLogger(__name__)
+
+
+def _log(*args, level=logging.INFO):
+    logger.log(level, " ".join(str(arg) for arg in args))
+
+
+def _hex_preview(data, limit=128):
+    raw = bytes(data)
+    hexed = binascii.hexlify(raw).decode()
+    if len(raw) > limit:
+        return "%s...<%d bytes>" % (hexed[: limit * 2], len(raw))
+    return "%s<%d bytes>" % (hexed, len(raw))
 
 
 # NOTE: This file intentionally preserves legacy naming and field layout because
@@ -107,59 +123,99 @@ class KlippySocket:
         self.stop_threads = False
         self.poll.register(self.webhook_socket, select.POLLIN | select.POLLHUP)
         self.socket_data = ""
-        self.t = threading.Thread(target=self.polling)
+        self.t = threading.Thread(target=self.polling, daemon=True)
         self.callback = callback
         self.lines = []
         self.t.start()
         atexit.register(self.klippyExit)
+        self._closed = False
+        self._socket_trace = True
 
     def klippyExit(self):
-        print("Shuting down Klippy Socket")
+        if self._closed:
+            return
+        self._closed = True
+        _log("Shuting down Klippy Socket", level=logging.INFO)
         self.stop_threads = True
-        self.t.join()
+        try:
+            self.poll.unregister(self.webhook_socket)
+        except Exception:
+            pass
+        try:
+            self.webhook_socket.close()
+        except Exception:
+            pass
+        if self.t.is_alive():
+            self.t.join(timeout=2.0)
 
     def webhook_socket_create(self, uds_filename):
         # Keep retrying until the Klippy socket is ready.
         self.webhook_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.webhook_socket.setblocking(0)
-        print("Waiting for connect to %s\n" % (uds_filename,))
+        _log("Waiting for connect to %s" % (uds_filename,), level=logging.INFO)
+        wait_logged = False
         while 1:
             try:
                 self.webhook_socket.connect(uds_filename)
             except socket.error as e:
                 if e.errno in (errno.ECONNREFUSED, errno.ENOENT):
+                    if not wait_logged:
+                        _log(
+                            "Klippy socket not ready (%s). Waiting for %s"
+                            % (e, uds_filename),
+                            level=logging.WARNING,
+                        )
+                        wait_logged = True
                     time.sleep(0.1)
                     continue
-                print(
-                    "Unable to connect socket %s [%d,%s]\n" % (
-                        uds_filename, e.errno,
-                        errno.errorcode[e.errno]
-                    ))
+                if not wait_logged:
+                    _log(
+                        "Unable to connect socket %s [%d,%s]\n" % (
+                            uds_filename, e.errno,
+                            errno.errorcode[e.errno]
+                        ),
+                        level=logging.WARNING,
+                    )
+                    wait_logged = True
                 time.sleep(1)
                 continue
             break
-        print("Connection.\n")
+        if wait_logged:
+            _log("Klippy socket is available again: %s" % uds_filename, level=logging.INFO)
+        _log("Connection.", level=logging.INFO)
         self.connected = True
 
     def process_socket(self):
+        if self.stop_threads:
+            return
         data = None
         try:
-            data = self.webhook_socket.recv(4096).decode()
+            raw = self.webhook_socket.recv(4096)
+            data = raw.decode(errors="replace")
+            if self._socket_trace and raw:
+                logger.debug("KLIPPY RX raw=%s", _hex_preview(raw))
         except socket.error as e:
+            if self.stop_threads:
+                return
             # Expected on non-blocking socket when no data is available.
             if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 return
+            if e.errno == errno.EBADF:
+                # Socket can already be closed during graceful shutdown.
+                return
             self.connected = False
-            print("Socket read error: %s" % e)
+            _log("Socket read error: %s" % e, level=logging.ERROR)
             return
         if not data:
             self.connected = False
-            print("Socket closed\n")
+            _log("Socket closed", level=logging.WARNING)
             return
         parts = data.split('\x03')
         parts[0] = self.socket_data + parts[0]
         self.socket_data = parts.pop()
         for line in parts:
+            if self._socket_trace:
+                logger.debug("KLIPPY RX line=%r", line)
             if self.callback:
                 self.callback(line)
 
@@ -167,6 +223,8 @@ class KlippySocket:
         # Called by other threads; queue is protected by lock.
         with self.lock:
             self.lines.append(line)
+            if self._socket_trace:
+                logger.debug("KLIPPY TX queue size=%d line=%r", len(self.lines), line)
 
     def send_line(self):
         if len(self.lines) == 0:
@@ -177,15 +235,17 @@ class KlippySocket:
         try:
             m = json.loads(line)
         except JSONDecodeError:
-            print("ERROR: Unable to parse line\n")
+            _log("ERROR: Unable to parse line", level=logging.ERROR)
             return
         cm = json.dumps(m, separators=(',', ':'))
         wdm = '{}\x03'.format(cm)
         try:
             self.webhook_socket.send(wdm.encode())
+            if self._socket_trace:
+                logger.debug("KLIPPY TX raw=%s", _hex_preview(wdm.encode()))
         except socket.error as e:
             self.connected = False
-            print("Socket send error: %s" % e)
+            _log("Socket send error: %s" % e, level=logging.ERROR)
 
     def polling(self):
         while True:
@@ -208,6 +268,7 @@ class MoonrakerSocket:
             'Content-Type': 'application/json'
         })
         self.base_address = 'http://' + address + ':' + str(port)
+        self.timeout = 8
 
 
 class PrinterData:
@@ -290,12 +351,18 @@ class PrinterData:
         self.square_corner_velocity = None
         
         self.op = MoonrakerSocket(URL, 80, API_Key)
-        print(self.op.base_address)
+        _log("Moonraker address: %s" % self.op.base_address, level=logging.INFO)
 
         self.klippy_start()
 
         self.event_loop = asyncio.new_event_loop()
         threading.Thread(target=self.event_loop.run_forever, daemon=True).start()
+
+    def stop(self):
+        if hasattr(self, "ks") and self.ks:
+            self.ks.klippyExit()
+        if self.event_loop and self.event_loop.is_running():
+            self.event_loop.call_soon_threadsafe(self.event_loop.stop)
 
     # ------------- Klippy socket integration ----------
     def klippy_start(self):
@@ -323,9 +390,12 @@ class PrinterData:
 
     def klippy_callback(self, line):
         # Parse async subscription payloads and update local cache.
-        klippyData = json.loads(line)
-        #print("klippy_callback:")
-        #print(json.dumps(klippyData, indent=2))
+        try:
+            klippyData = json.loads(line)
+        except JSONDecodeError:
+            _log("klippy_callback: failed to decode JSON line", level=logging.WARNING)
+            logger.debug("klippy_callback raw line=%r", line)
+            return
         status = None
         if 'result' in klippyData:
             if 'status' in klippyData['result']:
@@ -408,12 +478,12 @@ class PrinterData:
 
     def add_mm(self, axs, new_offset):
         gc = 'TESTZ Z={}'.format(new_offset)
-        print(axs, gc)
+        _log(axs, gc, level=logging.DEBUG)
         self.sendGCode(gc)
 
     def probe_adjust(self, change):
         gc = 'TESTZ Z={}'.format(change)
-        print(gc)
+        _log(gc, level=logging.DEBUG)
         self.sendGCode(gc)
 
     def probe_calibrate(self):
@@ -426,40 +496,62 @@ class PrinterData:
 
     def getREST(self, path):
         # Thin helper: keep error handling centralized in this module.
-        r = self.op.s.get(self.op.base_address + path)
-        d = r.content.decode('utf-8')
+        url = self.op.base_address + path
+        try:
+            r = self.op.s.get(url, timeout=self.op.timeout)
+            r.raise_for_status()
+        except RequestException as e:
+            _log("REST GET failed: %s (%s)" % (url, e), level=logging.ERROR)
+            return None
+        d = r.content.decode('utf-8', errors='replace')
+        logger.debug("REST GET ok: path=%s bytes=%d", path, len(d))
         try:
             return json.loads(d)
         except JSONDecodeError:
-            print('Decoding JSON has failed')
+            _log('Decoding JSON has failed', level=logging.ERROR)
+            logger.debug("REST GET non-JSON payload path=%s payload=%r", path, d[:256])
         return None
 
     async def _postREST(self, path, json):
-        self.op.s.post(self.op.base_address + path, json=json)
+        url = self.op.base_address + path
+        try:
+            r = self.op.s.post(url, json=json, timeout=self.op.timeout)
+            r.raise_for_status()
+            logger.debug("REST POST ok: path=%s status=%s", path, r.status_code)
+        except RequestException as e:
+            _log("REST POST failed: %s (%s)" % (url, e), level=logging.ERROR)
 
     def postREST(self, path, json):
+        logger.debug("Sending REST command: path=%s payload=%r", path, json)
         self.event_loop.call_soon_threadsafe(asyncio.create_task,self._postREST(path,json))
 
     def init_Webservices(self):
         # Initialize runtime metadata and printer limits.
         try:
-            requests.get(self.op.base_address)
-        except ConnectionError:
-            print('Web site does not exist')
+            self.op.s.get(self.op.base_address, timeout=self.op.timeout).raise_for_status()
+        except (ConnectionError, RequestException):
+            _log('Web site does not exist', level=logging.ERROR)
             return
         else:
-            print('Web site exists')
-        if self.getREST('/api/printer') is None:
+            _log('Web site exists', level=logging.INFO)
+        api_printer = self.getREST('/api/printer')
+        if api_printer is None:
             return
         self.update_variable()
 
-        #alternative approach
-        #full_version = self.getREST('/printer/info')['result']['software_version']
-        #self.SHORT_BUILD_VERSION = '-'.join(full_version.split('-',2)[:2])
-        self.SHORT_BUILD_VERSION = self.getREST('/machine/update/status?refresh=false')['result']['version_info']['klipper']['version']
+        update_status = self.getREST('/machine/update/status?refresh=false')
+        if update_status and 'result' in update_status:
+            self.SHORT_BUILD_VERSION = update_status['result']['version_info']['klipper']['version']
+        else:
+            info = self.getREST('/printer/info')
+            if info and 'result' in info and 'software_version' in info['result']:
+                full_version = info['result']['software_version']
+                self.SHORT_BUILD_VERSION = '-'.join(full_version.split('-', 2)[:2])
 
-        data = self.getREST('/printer/objects/query?toolhead')['result']['status']
-        #print(json.dumps(data, indent=2))
+        data_resp = self.getREST('/printer/objects/query?toolhead')
+        if not data_resp or 'result' not in data_resp:
+            return
+        data = data_resp['result']['status']
         toolhead = data['toolhead']
         volume = toolhead['axis_maximum'] #[x,y,z,w]
         self.MACHINE_SIZE = "{}x{}x{}".format(
@@ -477,18 +569,23 @@ class PrinterData:
     def get_gcode_store(self, count=100):
         gcode_store = None
         try:
-            gcode_store = self.getREST('/server/gcode_store?count=%d' % count)['result']['gcode_store']
-        except:
-            print("GCode store read failed!")
+            resp = self.getREST('/server/gcode_store?count=%d' % count)
+            if resp and 'result' in resp:
+                gcode_store = resp['result']['gcode_store']
+        except Exception:
+            _log("GCode store read failed!", level=logging.ERROR)
         
         return gcode_store
     
     def get_macros(self, filter_internal = True):
         macros = []
+        objects = []
         try:
-            objects = self.getREST('/printer/objects/list')['result']['objects']
-        except:
-            print("Could not read macro objects!")
+            resp = self.getREST('/printer/objects/list')
+            if resp and 'result' in resp:
+                objects = resp['result']['objects']
+        except Exception:
+            _log("Could not read macro objects!", level=logging.ERROR)
         
         for obj in objects:
             if 'gcode_macro' in obj:
@@ -503,9 +600,13 @@ class PrinterData:
     def GetFiles(self, refresh=False):
         if not self.files or refresh:
             try:
-                self.files = self.getREST('/server/files/list')["result"]
-            except:
-                print("Exception 418")
+                resp = self.getREST('/server/files/list')
+                if resp and "result" in resp:
+                    self.files = resp["result"]
+            except Exception:
+                _log("Exception 418", level=logging.ERROR)
+        if not self.files:
+            return []
         names = []
         for fl in self.files:
             names.append(fl["path"])
@@ -519,13 +620,13 @@ class PrinterData:
             return False
         query = '/printer/objects/query?extruder&heater_bed&gcode_move&fan&print_stats&motion_report&toolhead'
         try:
-            data = self.getREST(query)['result']['status']
-        except:
-            print("Exception 431")
+            resp = self.getREST(query)
+            if not resp or 'result' not in resp:
+                return False
+            data = resp['result']['status']
+        except Exception:
+            _log("Exception 431", level=logging.ERROR)
             return False
-
-        #print("update_variable:")
-        #print(json.dumps(data, indent=2))
 
         self.gcm = data['gcode_move']
         self.z_offset = self.gcm['homing_origin'][2] #z offset
@@ -577,9 +678,12 @@ class PrinterData:
             # Missing keys can happen transiently while Klipper is starting up.
             pass
         try:
-            self.job_Info = self.getREST('/printer/objects/query?virtual_sdcard&print_stats')['result']['status']
-        except:
-            print("Exception 470")
+            job_resp = self.getREST('/printer/objects/query?virtual_sdcard&print_stats')
+            if not job_resp or 'result' not in job_resp:
+                return False
+            self.job_Info = job_resp['result']['status']
+        except Exception:
+            _log("Exception 470", level=logging.ERROR)
             return False
 
         if self.job_Info:
@@ -625,15 +729,15 @@ class PrinterData:
         self.postREST('/printer/print/start', json={'filename': self.file_name})
 
     def cancel_job(self): #fixed
-        print('Canceling job:')
+        _log('Canceling job:', level=logging.INFO)
         self.postREST('/printer/print/cancel', json=None)
 
     def pause_job(self): #fixed
-        print('Pausing job:')
+        _log('Pausing job:', level=logging.INFO)
         self.postREST('/printer/print/pause', json=None)
 
     def resume_job(self): #fixed
-        print('Resuming job:')
+        _log('Resuming job:', level=logging.INFO)
         self.postREST('/printer/print/resume', json=None)
 
     def set_print_speed(self, fr):
@@ -660,7 +764,7 @@ class PrinterData:
         if axis == 'X' or axis == 'Y' or axis == 'Z' or axis == 'X Y Z':
             GCode += axis
         else:
-            print("home: parameter not recognised" + axis)
+            _log("home: parameter not recognised " + axis, level=logging.WARNING)
             return
 
         self.sendGCode(GCode)
@@ -676,6 +780,7 @@ class PrinterData:
             '\nG91' if not self.absolute_moves else ''))
 
     def sendGCode(self, gcode):
+        logger.debug("Sending GCode: %s", gcode)
         self.postREST('/printer/gcode/script', json={'script': gcode})
         if self.response_callback:
             self.response_callback(gcode, 'command')
@@ -694,7 +799,7 @@ class PrinterData:
             self.preHeat(self.material_preset[1].bed_temp, self.material_preset[1].hotend_temp)
 
     def save_settings(self):
-        print('saving settings')
+        _log('saving settings', level=logging.INFO)
         return True
 
     def setExtTemp(self, target, toolnum=0):
