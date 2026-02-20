@@ -113,7 +113,7 @@ class KlippySocket:
 			try:
 				self.webhook_socket.connect(uds_filename)
 			except socket.error as e:
-				if e.errno == errno.ECONNREFUSED:
+				if e.errno in (errno.ECONNREFUSED, errno.ENOENT):
 					time.sleep(0.1)
 					continue
 				print(
@@ -121,7 +121,8 @@ class KlippySocket:
 						uds_filename, e.errno,
 						errno.errorcode[e.errno]
 					))
-				exit(-1)
+				time.sleep(1)
+				continue
 			break
 		print("Connection.\n")
 		self.connected = True
@@ -130,12 +131,17 @@ class KlippySocket:
 		data = None
 		try:
 			data = self.webhook_socket.recv(4096).decode()
-		except:
-			pass
+		except socket.error as e:
+			# Expected on non-blocking socket when no data is available.
+			if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+				return
+			self.connected = False
+			print("Socket read error: %s" % e)
+			return
 		if not data:
 			self.connected = False
 			print("Socket closed\n")
-			exit(-1)
+			return
 		parts = data.split('\x03')
 		parts[0] = self.socket_data + parts[0]
 		self.socket_data = parts.pop()
@@ -160,7 +166,11 @@ class KlippySocket:
 			return
 		cm = json.dumps(m, separators=(',', ':'))
 		wdm = '{}\x03'.format(cm)
-		self.webhook_socket.send(wdm.encode())
+		try:
+			self.webhook_socket.send(wdm.encode())
+		except socket.error as e:
+			self.connected = False
+			print("Socket send error: %s" % e)
 
 	def polling(self):
 		while True:
@@ -255,6 +265,7 @@ class PrinterData:
 		self.status                 = None
 		self.max_velocity           = None
 		self.max_accel              = None
+		# Stored as percent (0..100) mapped from toolhead.minimum_cruise_ratio (0.0..1.0)
 		self.max_accel_to_decel     = None
 		self.square_corner_velocity = None
 		
@@ -345,9 +356,10 @@ class PrinterData:
 				if 'max_accel' in status['toolhead']:
 					if self.max_accel != status['toolhead']['max_accel']:
 						self.max_accel = status['toolhead']['max_accel']
-				if 'max_accel_to_decel' in status['toolhead']:
-					if self.max_accel_to_decel != status['toolhead']['max_accel_to_decel']:
-						self.max_accel_to_decel = status['toolhead']['max_accel_to_decel']
+				if 'minimum_cruise_ratio' in status['toolhead']:
+					min_cruise_ratio = int(status['toolhead']['minimum_cruise_ratio'] * 100 + 0.5)
+					if self.max_accel_to_decel != min_cruise_ratio:
+						self.max_accel_to_decel = min_cruise_ratio
 				if 'square_corner_velocity' in status['toolhead']:
 					if self.square_corner_velocity != status['toolhead']['square_corner_velocity']:
 						self.square_corner_velocity = status['toolhead']['square_corner_velocity']
@@ -436,7 +448,7 @@ class PrinterData:
 		self.Y_MAX_POS = int(volume[1])
 		self.max_velocity           = toolhead['max_velocity']
 		self.max_accel              = toolhead['max_accel']
-		self.max_accel_to_decel     = toolhead['max_accel_to_decel']
+		self.max_accel_to_decel     = int(toolhead['minimum_cruise_ratio'] * 100 + 0.5)
 		self.square_corner_velocity = toolhead['square_corner_velocity']
 
 	def get_gcode_store(self, count=100):
@@ -530,8 +542,9 @@ class PrinterData:
 			if self.max_accel != self.toolhead['max_accel']:
 				self.max_accel = self.toolhead['max_accel']
 				Update = True
-			if self.max_accel_to_decel != self.toolhead['max_accel_to_decel']:
-				self.max_accel_to_decel = self.toolhead['max_accel_to_decel']
+			min_cruise_ratio = int(self.toolhead['minimum_cruise_ratio'] * 100 + 0.5)
+			if self.max_accel_to_decel != min_cruise_ratio:
+				self.max_accel_to_decel = min_cruise_ratio
 				Update = True
 			if self.square_corner_velocity != self.toolhead['square_corner_velocity']:
 				self.square_corner_velocity = self.toolhead['square_corner_velocity']

@@ -35,7 +35,7 @@ SYNC_EXCLUDES := \
 	--exclude 'build/' \
 	--exclude 'dist/'
 
-.PHONY: test clean deps create update remove install uninstall upgrade config sync
+.PHONY: test clean venv install uninstall upgrade config sync
 
 # ----- Development / testing (repo-local only) -----
 
@@ -49,19 +49,12 @@ clean:
 	find . -type d -name ".pytest_cache" -prune -exec rm -rf {} +
 	find . -type d -name "build" -prune -exec rm -rf {} +
 	find . -type d -name "dist" -prune -exec rm -rf {} +
-
-deps: create
-	$(DEV_PIP) install --upgrade pip setuptools wheel
-	$(DEV_PIP) install -r requirements.txt
-
-create:
-	$(PYTHON) -m venv $(DEV_VENV)
-
-update: deps
-	$(DEV_PIP) install --upgrade -r requirements.txt
-
-remove:
 	rm -rf $(DEV_VENV)
+
+venv:
+	$(PYTHON) -m venv $(DEV_VENV)
+	$(DEV_PIP) install --upgrade pip setuptools wheel
+	$(DEV_PIP) install --upgrade -r requirements.txt
 
 # ----- Service install / update only -----
 
@@ -100,17 +93,7 @@ uninstall:
 	sudo systemctl daemon-reload
 	rm -rf $(SERVICE_VENV)
 
-upgrade: config
-	$(PYTHON) -m venv $(SERVICE_VENV)
-	$(SERVICE_PIP) install --upgrade pip setuptools wheel
-	$(SERVICE_PIP) install --upgrade -r requirements.txt
-	$(SERVICE_PIP) install --upgrade .
-	sed \
-		-e "s/__SERVICE_USER__/$(SERVICE_USER)/g" \
-		-e "s/__REPO_NAME__/$(REPO_NAME)/g" \
-		$(SERVICE_TEMPLATE) | sudo tee $(SERVICE_TARGET) >/dev/null
-	sudo chmod 644 $(SERVICE_TARGET)
-	sudo systemctl daemon-reload
+upgrade: install
 	sudo systemctl restart $(SERVICE_NAME)
 
 sync:

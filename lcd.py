@@ -1,4 +1,5 @@
 import binascii
+import os
 from time import sleep
 from threading import Thread
 from array import array
@@ -223,9 +224,14 @@ class LCD:
             dat.extend(dat[-1:])
             dat[len(dat)-2] = 10 #'\r'
             dat[len(dat)-3] = 13 #'\n'
-        self.ser.write(dat)
-        if eol:
-            self.ser.write(bytearray([0xFF, 0xFF, 0xFF]))
+        try:
+            self.ser.write(dat)
+            if eol:
+                self.ser.write(bytearray([0xFF, 0xFF, 0xFF]))
+        except (serial.SerialException, OSError) as e:
+            print("FATAL: LCD serial write failed: %s" % e)
+            # Let systemd restart the service on transport failure.
+            os._exit(1)
 
     def clear_thumbnail(self):
         self.write("printpause.cp0.close()")
@@ -422,7 +428,12 @@ class LCD:
 
     def run(self):
         while self.running:
-                incomingByte = self.ser.read(1)
+                try:
+                    incomingByte = self.ser.read(1)
+                except (serial.SerialException, OSError) as e:
+                    print("FATAL: LCD serial read failed: %s" % e)
+                    # Let systemd restart the service on transport failure.
+                    os._exit(1)
                 #
                 if self.rx_state == RX_STATE_IDLE:
                     if incomingByte[0] == FHONE:
@@ -694,6 +705,7 @@ class LCD:
             self.adjusting_max = True
             self.write("speed_settings.t4.font=0")
             self.write("speed_settings.accel.val=%d" % self.printer.max_accel)
+            # UI field is reused to display minimum_cruise_ratio in percent (0..100).
             self.write("speed_settings.accel_to_decel.val=%d" % self.printer.max_accel_to_decel)
             self.write("speed_settings.velocity.val=%d" % self.printer.max_velocity)
             self.write("speed_settings.sqr_crnr_vel.val=%d" % int(self.printer.square_corner_velocity*10))
@@ -711,10 +723,15 @@ class LCD:
             self.printer.max_accel = new_accel
 
         elif data[0] == 0x12 or data[0] == 0x16: #Accel to Decel decrease / increase
-            unit = self.accel_unit
+            # minimum_cruise_ratio percent is adjusted with speed-like steps.
+            unit = self.speed_unit
             if data[0] == 0x12:
-                unit = -self.accel_unit
+                unit = -self.speed_unit
             new_accel = self.printer.max_accel_to_decel + unit
+            if new_accel < 0:
+                new_accel = 0
+            if new_accel > 100:
+                new_accel = 100
             self.write("speed_settings.accel_to_decel.val=%d" % new_accel)
             
             self.callback(self.evt.ACCEL_TO_DECEL, new_accel)
