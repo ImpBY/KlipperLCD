@@ -1,10 +1,13 @@
 PYTHON ?= python3
 REPO_NAME := $(notdir $(CURDIR))
+REPO_NAME_LC := $(shell echo "$(REPO_NAME)" | tr '[:upper:]' '[:lower:]')
 
 # Dev/Test venv (inside repository)
 DEV_VENV ?= .venv
 DEV_VENV_BIN := $(DEV_VENV)/bin
 DEV_PIP := $(DEV_VENV_BIN)/pip
+DEV_PYTHON := $(DEV_VENV_BIN)/python
+TEST_REQUIREMENTS ?= requirements-test.txt
 
 # Service runtime context (derived from current user running make)
 SERVICE_USER ?= $(shell id -un)
@@ -26,6 +29,9 @@ PRINTER_HOST ?= btt
 PRINTER_USER ?= mcu
 PRINTER_PATH ?= /home/$(PRINTER_USER)/$(REPO_NAME)
 RSYNC ?= rsync
+PODMAN ?= podman
+TEST_CONTAINERFILE ?= Containerfile.test
+TEST_IMAGE ?= $(REPO_NAME_LC)-test:latest
 SYNC_EXCLUDES := \
 	--exclude '.git/' \
 	--exclude '.venv/' \
@@ -37,12 +43,13 @@ SYNC_EXCLUDES := \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test clean venv install uninstall upgrade config sync
+.PHONY: help test test-container clean venv install uninstall upgrade config sync
 
 help:
 	@echo "Available targets:"
 	@echo "  help       Show this help message"
-	@echo "  test       Run tests (currently placeholder)"
+	@echo "  test       Run tests in local venv ($(DEV_VENV))"
+	@echo "  test-container  Run tests in podman container"
 	@echo "  clean      Remove Python cache/build artifacts and $(DEV_VENV)"
 	@echo "  venv       Create/update local dev virtualenv ($(DEV_VENV))"
 	@echo "  config     Create/update service env file ($(SERVICE_ENV_FILE))"
@@ -53,8 +60,12 @@ help:
 
 # ----- Development / testing (repo-local only) -----
 
-test:
-	@echo "[TODO] Тесты не настроены. Добавьте тесты (например, pytest) и замените эту заглушку."
+test: venv
+	$(DEV_PYTHON) -m pytest -q
+
+test-container:
+	$(PODMAN) build -f $(TEST_CONTAINERFILE) -t $(TEST_IMAGE) .
+	$(PODMAN) run --rm $(TEST_IMAGE)
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
@@ -69,6 +80,8 @@ venv:
 	$(PYTHON) -m venv $(DEV_VENV)
 	$(DEV_PIP) install --upgrade pip setuptools wheel
 	$(DEV_PIP) install --upgrade -r requirements.txt
+	$(DEV_PIP) install --upgrade -r $(TEST_REQUIREMENTS)
+	$(DEV_PIP) install --upgrade -e .
 
 # ----- Service install / update only -----
 

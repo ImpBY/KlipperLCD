@@ -96,7 +96,7 @@ cat ~/printer_data/systemd/klipper.env
 ### 2. Install system dependencies
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip git rsync
+sudo apt-get install -y python3 python3-venv python3-pip git rsync podman
 ```
 
 ### 3. Get the code
@@ -150,6 +150,24 @@ make venv
 source .venv/bin/activate
 python3 main.py
 ```
+
+### 8. Run tests
+Local test run in repository venv:
+
+```bash
+make test
+```
+
+Containerized test run with Podman:
+
+```bash
+make test-container
+```
+
+Current test modules:
+- `tests/test_app_logic.py` (application event routing, thumbnail flow, env parsing)
+- `tests/test_lcd_logic.py` (LCD handlers, file navigation/selection, UI-side events)
+- `tests/test_printer_logic.py` (printer command formatting, REST/GCode routing, progress math)
 
 ### Makefile commands
 Show available commands any time:

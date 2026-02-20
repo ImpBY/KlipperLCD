@@ -216,6 +216,7 @@ class LCD:
         self.feedrate_e = 300
         self.z_offset_unit = None
         self.light = False
+        self.power_loss_recovery_enabled = True
         # Adjusting speed
         self.speed_adjusting = None
         self.speed_unit = 10
@@ -246,7 +247,7 @@ class LCD:
         return {
             0x1002: {
                 0x01: "main.print_open_files",
-                0x02: "main.abort_print_stub",
+                0x02: "main.abort_print",
             },
             0x1004: {
                 0x01: "adjustment.filament_tab",
@@ -329,7 +330,7 @@ class LCD:
                 0x04: "zoffset.step_0_01",
                 0x05: "zoffset.step_0_1",
                 0x06: "zoffset.step_1_0",
-                0x07: "zoffset.led2_stub",
+                0x07: "zoffset.light_toggle_alt",
                 0x08: "zoffset.light_toggle",
                 0x09: "zoffset.mesh_level_start",
                 0x0A: "zoffset.print_status_refresh",
@@ -974,7 +975,7 @@ class LCD:
                 self.write("page nosdcard")
 
         elif data[0] == 2: # Abort print
-            _log("Abort print not supported") #TODO: 
+            self.callback(self.evt.PRINT_STOP)
         else:
             _log("_MainPage: %d not supported" % data[0])
 
@@ -1290,7 +1291,8 @@ class LCD:
         elif data[0] == 0x0c:
             self.write("page warn_rdlevel")
         elif data[0] == 0x0d: # Advanced Settings
-            self.write("multiset.plrbutton.val=1") #TODO recovery enabled?
+            plr_value = 1 if self.power_loss_recovery_enabled else 0
+            self.write("multiset.plrbutton.val=%d" % plr_value)
             self.write("page multiset")
 
         else:
@@ -1316,7 +1318,7 @@ class LCD:
             if self.probe_mode:
                 z_pos = self.printer.z_pos + unit
                 _log("Probe: z_pos %d" % z_pos)
-                self.write("leveldata.z_offset.val=%d" % (int)(pos * 100))
+                self.write("leveldata.z_offset.val=%d" % (int)(z_pos * 100))
                 self.callback(self.evt.PROBE, unit)
             else:
                 offset += unit
@@ -1332,17 +1334,10 @@ class LCD:
         elif data[0] == 0x06:
             self.z_offset_unit = 1
             self.write("adjustzoffset.zoffset_value.val=3")
-        elif data[0] == 0x07: # LED 2 TODO: Where is LED2??
-            _log("Toggle led2!!????")
+        elif data[0] == 0x07: # Alternate LED/light toggle code on some HMI revisions.
+            self._toggle_light()
         elif data[0] == 0x08: # Light control
-            if self.light == True:
-                self.light = False
-                self.write("status_led2=0")
-                self.callback(self.evt.LIGHT, 0)
-            else:
-                self.light = True
-                self.write("status_led2=1")
-                self.callback(self.evt.LIGHT, 128)
+            self._toggle_light()
 
         elif data[0] == 0x09: # Bed mesh leveling
             # Wait for heaters?
@@ -1446,7 +1441,29 @@ class LCD:
         _log("_FilamentCheck: Not recognised %d" % data[0])
 
     def _PowerContinuePrint(self, data):
-        _log("_PowerContinuePrint: Not recognised %d" % data[0])
+        code = data[0]
+        if code in (0x00, 0x02):
+            self.power_loss_recovery_enabled = False
+        elif code in (0x01, 0x03):
+            self.power_loss_recovery_enabled = True
+        else:
+            _log("_PowerContinuePrint: Not recognised %d" % code)
+            return
+
+        self.write(
+            "multiset.plrbutton.val=%d"
+            % (1 if self.power_loss_recovery_enabled else 0)
+        )
+
+    def _toggle_light(self):
+        if self.light:
+            self.light = False
+            self.write("status_led2=0")
+            self.callback(self.evt.LIGHT, 0)
+        else:
+            self.light = True
+            self.write("status_led2=1")
+            self.callback(self.evt.LIGHT, 128)
 
     def _PrintSelectMode(self, data):   
         _log("_PrintSelectMode: Not recognised %d" % data[0])
