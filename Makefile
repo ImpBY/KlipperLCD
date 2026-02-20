@@ -35,7 +35,21 @@ SYNC_EXCLUDES := \
 	--exclude 'build/' \
 	--exclude 'dist/'
 
-.PHONY: test clean venv install uninstall upgrade config sync
+.DEFAULT_GOAL := help
+
+.PHONY: help test clean venv install uninstall upgrade config sync
+
+help:
+	@echo "Available targets:"
+	@echo "  help       Show this help message"
+	@echo "  test       Run tests (currently placeholder)"
+	@echo "  clean      Remove Python cache/build artifacts and $(DEV_VENV)"
+	@echo "  venv       Create/update local dev virtualenv ($(DEV_VENV))"
+	@echo "  config     Create/update service env file ($(SERVICE_ENV_FILE))"
+	@echo "  install    Install/update service venv + systemd unit"
+	@echo "  uninstall  Remove systemd unit and service venv"
+	@echo "  upgrade    Reinstall and restart service"
+	@echo "  sync       Rsync repository to printer host"
 
 # ----- Development / testing (repo-local only) -----
 
