@@ -1,15 +1,23 @@
+"""LCD transport and event-handling layer for the Neptune HMI panel.
+
+This module translates raw serial protocol messages from the LCD into
+high-level events, and pushes printer state updates back to the display.
+"""
+
 import binascii
 import os
-from time import sleep
-from threading import Thread
+import atexit
 from array import array
 from io import BytesIO
-from PIL import Image
-import lib_col_pic
+from threading import Thread
+from time import sleep
 
-import atexit
+from PIL import Image
+
+from . import lib_col_pic
 import serial
 
+# --------------------------- Protocol constants ---------------------------
 FHONE = 0x5a
 FHTWO = 0xa5
 FHLEN = 0x06
@@ -42,7 +50,9 @@ TPU   = 3
 PROBE = 4
 
 
-class _printerData():
+class _printerData:
+    """Internal printer state snapshot consumed by LCD update paths."""
+
     hotend_target   = None
     hotend          = None
     bed_target      = None
@@ -61,13 +71,15 @@ class _printerData():
     z_pos           = None
     z_offset        = None
     file_name       = None
-    
+
     max_velocity           = None
     max_accel              = None
     max_accel_to_decel     = None
     square_corner_velocity = None
 
-class LCDEvents():
+class LCDEvents:
+    """Event IDs emitted from LCD input handlers to the app layer."""
+
     HOME           = 1
     MOVE_X         = 2
     MOVE_Y         = 3
@@ -100,7 +112,10 @@ class LCDEvents():
 
 
 class LCD:
+    """Serial protocol adapter for the Neptune LCD panel."""
+
     def __init__(self, port=None, baud=115200, callback=None):
+        # Map LCD register addresses to handlers.
         self.addr_func_map = {
             0x1002: self._MainPage,          
             0x1004: self._Adjustment,        
@@ -186,10 +201,12 @@ class LCD:
         atexit.register(self._atexit)
 
     def _atexit(self):
+        # Keep shutdown idempotent for normal exits and fatal-path exits.
         self.ser.close()
         self.running = False
-    
+
     def start(self, *args, **kwargs):
+        """Open serial transport and start background read loop."""
         self.running = True
         self.ser.open()
         Thread(target=self.run).start()
@@ -201,7 +218,7 @@ class LCD:
         self.write("boot.j0.val=1")
         self.write("boot.t0.txt=\"KlipperLCD.service starting...\"")
         #self.write("page main")
-    
+
     def boot_progress(self, progress):
         self.write("boot.t0.txt=\"Waiting for Klipper...\"")
         self.write("boot.j0.val=%d" % progress)
@@ -213,6 +230,7 @@ class LCD:
         self.write("information.sversion.txt=\"%s\"" % fw)        
 
     def write(self, data, eol=True, lf=False):
+        """Write a command payload to LCD with optional framing/newline tweaks."""
         dat = bytearray()
         if type(data) == str:
             dat.extend(map(ord, data))
@@ -306,11 +324,11 @@ class LCD:
             self.write("printpause.cp0.write(printpause.va1.txt)")
             self.is_thumbnail_written = True
             print("Write thumbnail to LCD done!")
-        
+
         if self.askprint == True:
             self.write("askprint.cp0.aph=127")
             self.write("askprint.cp0.write(printpause.va1.txt)")            
-   
+
     def clear_console(self):
         self.write("console.buf.txt=\"\"")
         self.write("console.slt0.txt=\"\"")
@@ -332,14 +350,14 @@ class LCD:
             print("format_console_data: type unknown")
 
         return data
-    
+
     def write_console(self, data):
         if "\"" in data:
             data = data.replace("\"", "'")
 
         if '\n' in data:
             data = data.replace("\n", "\r\n")
-        
+
         self.write("console.buf.txt=\"%s\"" % data, lf = True)
         self.write("console.buf.txt+=console.slt0.txt")
         self.write("console.slt0.txt=console.buf.txt")
@@ -427,54 +445,50 @@ class LCD:
         self.write("leveling.tm0.en=0")
 
     def run(self):
+        """Read framed serial packets and dispatch handlers until stopped."""
         while self.running:
-                try:
-                    incomingByte = self.ser.read(1)
-                except (serial.SerialException, OSError) as e:
-                    print("FATAL: LCD serial read failed: %s" % e)
-                    # Let systemd restart the service on transport failure.
-                    os._exit(1)
-                #
-                if self.rx_state == RX_STATE_IDLE:
-                    if incomingByte[0] == FHONE:
+            try:
+                incomingByte = self.ser.read(1)
+            except (serial.SerialException, OSError) as e:
+                print("FATAL: LCD serial read failed: %s" % e)
+                # Let systemd restart the service on transport failure.
+                os._exit(1)
+
+            if self.rx_state == RX_STATE_IDLE:
+                if incomingByte[0] == FHONE:
+                    self.rx_buf.extend(incomingByte)
+                elif incomingByte[0] == FHTWO:
+                    if self.rx_buf[0] == FHONE:
                         self.rx_buf.extend(incomingByte)
-                    elif incomingByte[0] == FHTWO:
-                        if self.rx_buf[0] == FHONE:
-                            self.rx_buf.extend(incomingByte)
-                            self.rx_state = RX_STATE_READ_LEN
-                        else:
-                            self.rx_buf.clear()
-                            print("Unexpected header received: 0x%02x ()" % incomingByte[0])         
+                        self.rx_state = RX_STATE_READ_LEN
                     else:
                         self.rx_buf.clear()
-                        self.error_from_lcd = True
-                        print("Unexpected data received: 0x%02x" % incomingByte[0])
-                #
-                elif self.rx_state == RX_STATE_READ_LEN:
-                    # Check if len is as expected, seems to alway be 6 bytes?
-                    #if incomingByte[0] == FHLEN:
-                    self.rx_buf.extend(incomingByte) # Read length
-                    self.rx_state = RX_STATE_READ_DAT
-                    #else:
-                    #    self.rx_buf.clear()
-                    #    self.rx_state = RX_STATE_IDLE
-                    #    print("Unexpected len param received: 0x%02x" % incomingByte[0])
-                #
-                elif self.rx_state == RX_STATE_READ_DAT:
-                    self.rx_buf.extend(incomingByte)
-                    self.rx_data_cnt += 1
-                    len = self.rx_buf[2]
-                    if self.rx_data_cnt >= len:
-                        # New command/message received from display
-                        cmd = self.rx_buf[3]
-                        data = self.rx_buf[-(len-1):] # Remove header and command
-                        # Handle incoming data
-                        self._handle_command(cmd, data)
-                        self.rx_buf.clear()
-                        self.rx_data_cnt = 0
-                        self.rx_state = RX_STATE_IDLE
+                        print("Unexpected header received: 0x%02x ()" % incomingByte[0])
+                else:
+                    self.rx_buf.clear()
+                    self.error_from_lcd = True
+                    print("Unexpected data received: 0x%02x" % incomingByte[0])
+
+            elif self.rx_state == RX_STATE_READ_LEN:
+                # Frame length byte follows header.
+                self.rx_buf.extend(incomingByte)
+                self.rx_state = RX_STATE_READ_DAT
+
+            elif self.rx_state == RX_STATE_READ_DAT:
+                self.rx_buf.extend(incomingByte)
+                self.rx_data_cnt += 1
+                frame_len = self.rx_buf[2]
+                if self.rx_data_cnt >= frame_len:
+                    # Full command/frame received from display.
+                    cmd = self.rx_buf[3]
+                    data = self.rx_buf[-(frame_len-1):]  # remove header + command
+                    self._handle_command(cmd, data)
+                    self.rx_buf.clear()
+                    self.rx_data_cnt = 0
+                    self.rx_state = RX_STATE_IDLE
 
     def _handle_command(self, cmd, dat):
+        """Decode command payload and dispatch by protocol opcode."""
         if cmd == CMD_WRITEVAR: #0x82
             print("Write variable command received")
             print(binascii.hexlify(dat))
@@ -498,6 +512,7 @@ class LCD:
             print(binascii.hexlify(dat))
 
     def _handle_readvar(self, addr, data):
+        """Dispatch decoded LCD register data to mapped handler."""
         if addr in self.addr_func_map:
             # Call function corresponding with addr
             if (self.addr_func_map[addr].__name__ == "_BedLevelFun" and data[0] == 0x0a):
@@ -544,7 +559,7 @@ class LCD:
             print("Abort print not supported") #TODO: 
         else:
             print("_MainPage: %d not supported" % data[0])
-    
+
     def _Adjustment(self, data):
         if data[0] == 0x01: # Filament tab
             self.write("adjusttemp.targettemp.val=%d" % self.printer.hotend_target)
@@ -593,10 +608,10 @@ class LCD:
             self.callback(self.evt.FAN, self.printer.fan)
         else:
             print("_Adjustment: %d not supported" % data[0])
-    
+
     def _PrintSpeed(self, data):        
         print("_PrintSpeed: %d not supported" % data[0])
-    
+
     def _StopPrint(self, data):  
         if data[0] == 0x01 or data[0] == 0xf1:
             self.callback(self.evt.PRINT_STOP)
@@ -606,7 +621,7 @@ class LCD:
                 self.write("page printpause")
         else:
             print("_StopPrint: %d not supported" % data[0])
-    
+
     def _PausePrint(self, data):        
         if data[0] == 0x01:
             if self.printer.state == "printing":
@@ -616,8 +631,8 @@ class LCD:
             self.write("page printpause")
         else:
             print("_PausePrint: %d not supported" % data[0])
-           
-    
+
+
     def _ResumePrint(self, data):       
         if data[0] == 0x01:
             if self.printer.state == "paused" or self.printer.state == "pausing":
@@ -625,10 +640,10 @@ class LCD:
             self.write("page printpause")
         else:
             print("_ResumePrint: %d not supported" % data[0])
-    
+
     def _ZOffset(self, data):           
         print("_ZOffset: %d not supported" % data[0])
-    
+
     def _TempScreen(self, data):
         if data[0] == 0x01: # Hotend
             self.write("adjusttemp.targettemp.val=%d" % self.printer.hotend_target)
@@ -718,7 +733,7 @@ class LCD:
                 unit = -self.accel_unit
             new_accel = self.printer.max_accel + unit
             self.write("speed_settings.accel.val=%d" % new_accel)
-            
+
             self.callback(self.evt.ACCEL, new_accel)
             self.printer.max_accel = new_accel
 
@@ -733,7 +748,7 @@ class LCD:
             if new_accel > 100:
                 new_accel = 100
             self.write("speed_settings.accel_to_decel.val=%d" % new_accel)
-            
+
             self.callback(self.evt.ACCEL_TO_DECEL, new_accel)
             self.printer.max_accel_to_decel = new_accel
 
@@ -743,7 +758,7 @@ class LCD:
                 unit = -self.speed_unit
             new_velocity = self.printer.max_velocity + unit
             self.write("speed_settings.velocity.val=%d" % new_velocity)
-            
+
             self.callback(self.evt.VELOCITY, new_velocity)
             self.printer.max_velocity = new_velocity
 
@@ -760,7 +775,7 @@ class LCD:
 
         else:
             print("_TempScreen: Not recognised %d" % data[0])
-    
+
     def _CoolScreen(self, data):
         if data[0] == 0x01: #Turn off nozzle
             if self.printer.state == "printing":
@@ -817,19 +832,19 @@ class LCD:
             self.write("page tempsetvalue")
         else:
             print("_CoolScreen: Not recognised %d" % data[0])
-    
+
     def _Heater0TempEnter(self, data):
         temp = ((data[0] & 0x00FF) << 8) | ((data[0] & 0xFF00) >> 8) 
         print("Set nozzle temp: %d" % temp)
         self.callback(self.evt.NOZZLE, temp)
-    
+
     def _Heater1TempEnter(self, data):  
         print("_Heater1TempEnter: %d not supported" % data[0])
-    
+
     def _HotBedTempEnter(self, data):   
         temp = ((data[0] & 0x00FF) << 8) | ((data[0] & 0xFF00) >> 8) 
         self.callback(self.evt.BED, temp)
-    
+
     def _SettingScreen(self, data):
         if data[0] == 0x01:
             self.callback(self.evt.PROBE)
@@ -839,7 +854,7 @@ class LCD:
         elif data[0] == 0x06: # Motor release
             self.callback(self.evt.MOTOR_OFF)
         elif data[0] == 0x07: # Fan Control
-            
+
             pass
         elif data[0] == 0x08: 
             print("What is this???")
@@ -865,7 +880,7 @@ class LCD:
             print("_SettingScreen: Not recognised %d" % data[0])
 
         return
-    
+
     def _SettingBack(self, data):
         if data[0] == 0x01:
             if self.probe_mode:
@@ -873,14 +888,14 @@ class LCD:
                 self.callback(self.evt.PROBE_BACK)
         else:
             print("_SettingScreen: Not recognised %d" % data[0])
-    
+
     def _BedLevelFun(self, data):
         if data[0] == 0x02 or data[0] == 0x03: # z_offset Up / Down
             offset = self.printer.z_offset
             unit = self.z_offset_unit
             if data[0] == 0x03:
                 unit = - self.z_offset_unit
-            
+
             if self.probe_mode:
                 z_pos = self.printer.z_pos + unit
                 print("Probe: z_pos %d" % z_pos)
@@ -947,7 +962,7 @@ class LCD:
             self.write("printpause.printvalue.txt=\"%d\"" % self.printer.percent)
         else:
             print("_BedLevelFun: Data not recognised %d" % data[0])
-    
+
     def _AxisPageSelect(self, data):
         if data[0] == 0x04: #Home all
             self.callback(self.evt.HOME, 'X Y Z')
@@ -959,7 +974,7 @@ class LCD:
             self.callback(self.evt.HOME, 'Z')
         else:
             print("_AxisPageSelect: Data not recognised %d" % data[0])
-    
+
     def _Xaxismove(self, data):
         if data[0] == 0x01: # X+
             self.callback(self.evt.MOVE_X, self.move_unit)
@@ -967,7 +982,7 @@ class LCD:
             self.callback(self.evt.MOVE_X, -self.move_unit)
         else:
             print("_Xaxismove: Data not recognised %d" % data[0])
-    
+
     def _Yaxismove(self, data):         
         if data[0] == 0x01: # Y+
             self.callback(self.evt.MOVE_Y, self.move_unit)
@@ -975,7 +990,7 @@ class LCD:
             self.callback(self.evt.MOVE_Y, -self.move_unit)
         else:
             print("_Yaxismove: Data not recognised %d" % data[0])
-    
+
     def _Zaxismove(self, data):
         if data[0] == 0x01: # Z+
             self.callback(self.evt.MOVE_Z, self.move_unit)
@@ -983,10 +998,10 @@ class LCD:
             self.callback(self.evt.MOVE_Z, -self.move_unit)
         else:
             print("_Zaxismove: Data not recognised %d" % data[0])
-    
+
     def _SelectExtruder(self, data):    
         print("_SelectExtruder: Not recognised %d" % data[0])
-    
+
     def _Heater0LoadEnter(self, data):
         load_len = ((data[0] & 0x00FF) << 8) | ((data[0] & 0xFF00) >> 8)
         self.load_len = load_len
@@ -996,7 +1011,7 @@ class LCD:
         feedrate_e = ((data[0] & 0x00FF) << 8) | ((data[0] & 0xFF00) >> 8)
         self.feedrate_e = feedrate_e
         print(feedrate_e)
-    
+
     def _FilamentLoad(self, data):
         if data[0] == 0x01 or data[0] == 0x02: # Load / Unload 
             if self.printer.state == 'printing':
@@ -1015,31 +1030,31 @@ class LCD:
             self.write("page main")
         else:   
             print("_FilamentLoad: Not recognised %d" % data[0])
-    
+
     def _SelectLanguage(self, data):    
         print("_SelectLanguage: Not recognised %d" % data[0])
-    
+
     def _FilamentCheck(self, data):     
         print("_FilamentCheck: Not recognised %d" % data[0])
-    
+
     def _PowerContinuePrint(self, data):
         print("_PowerContinuePrint: Not recognised %d" % data[0])
-    
+
     def _PrintSelectMode(self, data):   
         print("_PrintSelectMode: Not recognised %d" % data[0])
-    
+
     def _XhotendOffset(self, data):     
         print("_XhotendOffset: Not recognised %d" % data[0])
-    
+
     def _YhotendOffset(self, data):     
         print("_YhotendOffset: Not recognised %d" % data[0])
-    
+
     def _ZhotendOffset(self, data):     
         print("_ZhotendOffset: Not recognised %d" % data[0])
-    
+
     def _StoreMemory(self, data):       
         print("_StoreMemory: Not recognised %d" % data[0])
-    
+
     def _PrintFile(self, data):
         if data[0] == 0x01:
             self.write("file%d.t%d.pco=65504" % ((self.selected_file / 5) + 1, self.selected_file))
@@ -1061,10 +1076,10 @@ class LCD:
                 self.write("page file1")
             else:
                 self.write("page main")
-            
+
         else:
             print("_PrintFile: Not recognised %d" % data[0])
-    
+
     def _SelectFile(self, data):
         print(self.files)
         if self.files and data[0] <= len(self.files):
@@ -1079,10 +1094,10 @@ class LCD:
         else:
             print("_SelectFile: Data not recognised %d" % data[0])
 
-    
+
     def _ChangePage(self, data):        
         print("_ChangePage: Not recognised %d" % data[0])
-    
+
     def _SetPreNozzleTemp(self, data):
         material = self.preset_index
         if data[0] == 0x01:
@@ -1090,7 +1105,7 @@ class LCD:
         elif data[0] == 0x02:
             self.preset_temp[material] -= self.temp_unit
         self.write("tempsetvalue.nozzletemp.val=%d" % self.preset_temp[material])
-    
+
     def _SetPreBedTemp(self, data):
         material = self.preset_index
         if data[0] == 0x01:
@@ -1099,13 +1114,13 @@ class LCD:
             self.preset_bed_temp[material] -= self.temp_unit
         material = self.preset_index
         self.write("tempsetvalue.bedtemp.val=%d" % self.preset_bed_temp[material])
-    
+
     def _HardwareTest(self, data):
         if data[0] == 0x0f: # Hardware test page
             pass #Always requested on main page load, ignore
         else:
             print ("_HardwareTest: Not implemented: 0x%x" % data[0])
-    
+
     def _Err_Control(self, data):       
         print("_Err_Control: Not recognised %d" % data[0])
 
@@ -1122,7 +1137,7 @@ if __name__ == "__main__":
 
     lcd.ser.write(b'main.va0.val=1')
     lcd.ser.write(bytearray([0xFF, 0xFF, 0xFF]))
-    
+
 
     sleep(1)
 

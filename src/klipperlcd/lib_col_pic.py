@@ -1,15 +1,28 @@
 # Copyright (c) 2023 Molodos
 # The ElegooNeptuneThumbnails plugin is released under the terms of the AGPLv3 or higher.
 
+"""Color-picture encoder used by the LCD thumbnail pipeline.
+
+Important:
+- This module is performance/compatibility sensitive.
+- Formatting and comments were improved, but the algorithm and value flow
+  are intentionally preserved.
+"""
+
+
 def ColPic_EncodeStr(fromcolor16, picw, pich, outputdata: bytearray, outputmaxtsize, colorsmax):
+    """Encode color data, then convert packed bytes into LCD-specific ASCII-ish stream."""
     qty = 0
     temp = 0
     strindex = 0
     hexindex = 0
-    TempBytes = bytearray(4)
+    temp_bytes = bytearray(4)
+
     qty = ColPicEncode(fromcolor16, picw, pich, outputdata, outputmaxtsize, colorsmax)
     if qty == 0:
         return 0
+
+    # Pad to 3-byte groups for 4/3 expansion.
     temp = 3 - qty % 3
     while temp > 0 and qty < outputmaxtsize:
         outputdata[qty] = 0
@@ -18,35 +31,40 @@ def ColPic_EncodeStr(fromcolor16, picw, pich, outputdata: bytearray, outputmaxts
 
     if qty * 4 / 3 >= outputmaxtsize:
         return 0
+
     hexindex = qty
     strindex = qty * 4 / 3
     while hexindex > 0:
         hexindex -= 3
         strindex -= 4
-        TempBytes[0] = outputdata[hexindex] >> 2
-        TempBytes[1] = outputdata[hexindex] & 3
-        TempBytes[1] <<= 4
-        TempBytes[1] += outputdata[hexindex + 1] >> 4
-        TempBytes[2] = outputdata[hexindex + 1] & 15
-        TempBytes[2] <<= 2
-        TempBytes[2] += outputdata[hexindex + 2] >> 6
-        TempBytes[3] = outputdata[hexindex + 2] & 63
-        TempBytes[0] += 48
-        if chr(TempBytes[0]) == '\\':
-            TempBytes[0] = 126
-        TempBytes[1] += 48
-        if chr(TempBytes[1]) == '\\':
-            TempBytes[1] = 126
-        TempBytes[2] += 48
-        if chr(TempBytes[2]) == '\\':
-            TempBytes[2] = 126
-        TempBytes[3] += 48
-        if chr(TempBytes[3]) == '\\':
-            TempBytes[3] = 126
-        outputdata[int(strindex)] = TempBytes[0]
-        outputdata[int(strindex) + 1] = TempBytes[1]
-        outputdata[int(strindex) + 2] = TempBytes[2]
-        outputdata[int(strindex) + 3] = TempBytes[3]
+
+        temp_bytes[0] = outputdata[hexindex] >> 2
+        temp_bytes[1] = outputdata[hexindex] & 3
+        temp_bytes[1] <<= 4
+        temp_bytes[1] += outputdata[hexindex + 1] >> 4
+        temp_bytes[2] = outputdata[hexindex + 1] & 15
+        temp_bytes[2] <<= 2
+        temp_bytes[2] += outputdata[hexindex + 2] >> 6
+        temp_bytes[3] = outputdata[hexindex + 2] & 63
+
+        # Custom encoding base: +48, with backslash remapped to '~'.
+        temp_bytes[0] += 48
+        if chr(temp_bytes[0]) == '\\':
+            temp_bytes[0] = 126
+        temp_bytes[1] += 48
+        if chr(temp_bytes[1]) == '\\':
+            temp_bytes[1] = 126
+        temp_bytes[2] += 48
+        if chr(temp_bytes[2]) == '\\':
+            temp_bytes[2] = 126
+        temp_bytes[3] += 48
+        if chr(temp_bytes[3]) == '\\':
+            temp_bytes[3] = 126
+
+        outputdata[int(strindex)] = temp_bytes[0]
+        outputdata[int(strindex) + 1] = temp_bytes[1]
+        outputdata[int(strindex) + 2] = temp_bytes[2]
+        outputdata[int(strindex) + 3] = temp_bytes[3]
 
     qty = qty * 4 / 3
     outputdata[int(qty)] = 0
@@ -54,43 +72,47 @@ def ColPic_EncodeStr(fromcolor16, picw, pich, outputdata: bytearray, outputmaxts
 
 
 def ColPicEncode(fromcolor16, picw, pich, outputdata: bytearray, outputmaxtsize, colorsmax):
+    """Build palette + RLE-ish payload into outputdata buffer."""
     l0 = U16HEAD()
-    Head0 = ColPicHead3()
-    Listu16 = []
-    for i in range(1024):
-        Listu16.append(U16HEAD())
+    head0 = ColPicHead3()
+    listu16 = []
+    for _ in range(1024):
+        listu16.append(U16HEAD())
 
-    ListQty = 0
+    listqty = 0
     enqty = 0
     dotsqty = picw * pich
+
     if colorsmax > 1024:
         colorsmax = 1024
+
     for i in range(dotsqty):
-        ListQty = ADList0(fromcolor16[i], Listu16, ListQty, 1024)
+        listqty = ADList0(fromcolor16[i], listu16, listqty, 1024)
 
-    for index in range(1, ListQty):
-        l0 = Listu16[index]
+    # Sort by occurrence count (descending-ish via insertion moves).
+    for index in range(1, listqty):
+        l0 = listu16[index]
         for i in range(index):
-            if l0.qty >= Listu16[i].qty:
-                aListu16 = bListu16 = Listu16.copy()
+            if l0.qty >= listu16[i].qty:
+                alistu16 = blistu16 = listu16.copy()
                 for j in range(index - i):
-                    Listu16[i + j + 1] = aListu16[i + j]
-
-                Listu16[i] = l0
+                    listu16[i + j + 1] = alistu16[i + j]
+                listu16[i] = l0
                 break
 
-    while ListQty > colorsmax:
-        l0 = Listu16[ListQty - 1]
+    # Merge least-frequent colors into nearest bucket until colorsmax.
+    while listqty > colorsmax:
+        l0 = listu16[listqty - 1]
         minval = 255
         fid = -1
         for i in range(colorsmax):
-            cha0 = Listu16[i].A0 - l0.A0
+            cha0 = listu16[i].A0 - l0.A0
             if cha0 < 0:
                 cha0 = 0 - cha0
-            cha1 = Listu16[i].A1 - l0.A1
+            cha1 = listu16[i].A1 - l0.A1
             if cha1 < 0:
                 cha1 = 0 - cha1
-            cha2 = Listu16[i].A2 - l0.A2
+            cha2 = listu16[i].A2 - l0.A2
             if cha2 < 0:
                 cha2 = 0 - cha2
             chall = cha0 + cha1 + cha2
@@ -100,37 +122,47 @@ def ColPicEncode(fromcolor16, picw, pich, outputdata: bytearray, outputmaxtsize,
 
         for i in range(dotsqty):
             if fromcolor16[i] == l0.colo16:
-                fromcolor16[i] = Listu16[fid].colo16
+                fromcolor16[i] = listu16[fid].colo16
 
-        ListQty = ListQty - 1
+        listqty = listqty - 1
 
     for n in range(len(outputdata)):
         outputdata[n] = 0
 
-    Head0.encodever = 3
-    Head0.oncelistqty = 0
-    Head0.mark = 98419516
-    Head0.ListDataSize = ListQty * 2
+    head0.encodever = 3
+    head0.oncelistqty = 0
+    head0.mark = 98419516
+    head0.ListDataSize = listqty * 2
+
+    # Header bytes
     outputdata[0] = 3
     outputdata[12] = 60
     outputdata[13] = 195
     outputdata[14] = 221
     outputdata[15] = 5
-    outputdata[16] = ListQty * 2 & 255
-    outputdata[17] = (ListQty * 2 & 65280) >> 8
-    outputdata[18] = (ListQty * 2 & 16711680) >> 16
-    outputdata[19] = (ListQty * 2 & 4278190080) >> 24
-    sizeofColPicHead3 = 32
-    for i in range(ListQty):
-        outputdata[sizeofColPicHead3 + i * 2 + 1] = (Listu16[i].colo16 & 65280) >> 8
-        outputdata[sizeofColPicHead3 + i * 2 + 0] = Listu16[i].colo16 & 255
+    outputdata[16] = listqty * 2 & 255
+    outputdata[17] = (listqty * 2 & 65280) >> 8
+    outputdata[18] = (listqty * 2 & 16711680) >> 16
+    outputdata[19] = (listqty * 2 & 4278190080) >> 24
 
-    enqty = Byte8bitEncode(fromcolor16, sizeofColPicHead3, Head0.ListDataSize >> 1, dotsqty, outputdata,
-                           sizeofColPicHead3 + Head0.ListDataSize,
-                           outputmaxtsize - sizeofColPicHead3 - Head0.ListDataSize)
-    Head0.ColorDataSize = enqty
-    Head0.PicW = picw
-    Head0.PicH = pich
+    sizeof_col_pic_head3 = 32
+    for i in range(listqty):
+        outputdata[sizeof_col_pic_head3 + i * 2 + 1] = (listu16[i].colo16 & 65280) >> 8
+        outputdata[sizeof_col_pic_head3 + i * 2 + 0] = listu16[i].colo16 & 255
+
+    enqty = Byte8bitEncode(
+        fromcolor16,
+        sizeof_col_pic_head3,
+        head0.ListDataSize >> 1,
+        dotsqty,
+        outputdata,
+        sizeof_col_pic_head3 + head0.ListDataSize,
+        outputmaxtsize - sizeof_col_pic_head3 - head0.ListDataSize,
+    )
+    head0.ColorDataSize = enqty
+    head0.PicW = picw
+    head0.PicH = pich
+
     outputdata[4] = picw & 255
     outputdata[5] = (picw & 65280) >> 8
     outputdata[6] = (picw & 16711680) >> 16
@@ -143,37 +175,42 @@ def ColPicEncode(fromcolor16, picw, pich, outputdata: bytearray, outputmaxtsize,
     outputdata[21] = (enqty & 65280) >> 8
     outputdata[22] = (enqty & 16711680) >> 16
     outputdata[23] = (enqty & 4278190080) >> 24
-    return sizeofColPicHead3 + Head0.ListDataSize + Head0.ColorDataSize
+
+    return sizeof_col_pic_head3 + head0.ListDataSize + head0.ColorDataSize
 
 
-def ADList0(val, Listu16, ListQty, maxqty):
-    qty = ListQty
+def ADList0(val, listu16, listqty, maxqty):
+    """Add/update color histogram entry in listu16."""
+    qty = listqty
     if qty >= maxqty:
-        return ListQty
-    for i in range(qty):
-        if Listu16[i].colo16 == val:
-            Listu16[i].qty += 1
-            return ListQty
+        return listqty
 
-    A0 = val >> 11 & 31
-    A1 = (val & 2016) >> 5
-    A2 = val & 31
-    Listu16[qty].colo16 = val
-    Listu16[qty].A0 = A0
-    Listu16[qty].A1 = A1
-    Listu16[qty].A2 = A2
-    Listu16[qty].qty = 1
-    ListQty = qty + 1
-    return ListQty
+    for i in range(qty):
+        if listu16[i].colo16 == val:
+            listu16[i].qty += 1
+            return listqty
+
+    a0 = val >> 11 & 31
+    a1 = (val & 2016) >> 5
+    a2 = val & 31
+    listu16[qty].colo16 = val
+    listu16[qty].A0 = a0
+    listu16[qty].A1 = a1
+    listu16[qty].A2 = a2
+    listu16[qty].qty = 1
+    listqty = qty + 1
+    return listqty
 
 
 def Byte8bitEncode(fromcolor16, listu16Index, listqty, dotsqty, outputdata: bytearray, outputdataIndex, decMaxBytesize):
+    """Encode indexed color stream into packed control/data bytes."""
     listu16 = outputdata
     dots = 0
     srcindex = 0
     decindex = 0
     lastid = 0
     temp = 0
+
     while dotsqty > 0:
         dots = 1
         for i in range(dotsqty - 1):
@@ -197,6 +234,7 @@ def Byte8bitEncode(fromcolor16, listu16Index, listqty, dotsqty, outputdata: byte
         sid = int(temp / 32)
         if sid > 255:
             sid = 255
+
         if lastid != sid:
             if decindex >= decMaxBytesize:
                 dotsqty = 0
@@ -206,6 +244,7 @@ def Byte8bitEncode(fromcolor16, listu16Index, listqty, dotsqty, outputdata: byte
             outputdata[decindex + outputdataIndex] += sid
             decindex += 1
             lastid = sid
+
         if dots <= 6:
             if decindex >= decMaxBytesize:
                 dotsqty = 0
@@ -232,6 +271,7 @@ def Byte8bitEncode(fromcolor16, listu16Index, listqty, dotsqty, outputdata: byte
                 aa = 255
             outputdata[decindex + outputdataIndex] = aa
             decindex += 1
+
         srcindex += dots
         dotsqty -= dots
 
@@ -239,6 +279,7 @@ def Byte8bitEncode(fromcolor16, listu16Index, listqty, dotsqty, outputdata: byte
 
 
 class U16HEAD:
+    """Palette entry helper used by ColPicEncode."""
 
     def __init__(self):
         self.colo16 = 0
@@ -251,6 +292,7 @@ class U16HEAD:
 
 
 class ColPicHead3:
+    """Header container matching expected encoded payload layout."""
 
     def __init__(self):
         self.encodever = 0

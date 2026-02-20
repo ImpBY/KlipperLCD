@@ -19,7 +19,10 @@ dependencies = [
 ]
 
 [project.scripts]
-klipperlcd = "main:run"
+klipperlcd = "klipperlcd.app:run"
 
 [tool.setuptools]
-py-modules = ["main", "lcd", "printer", "lib_col_pic"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
