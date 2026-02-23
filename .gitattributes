@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# Keep binary assets untouched
+*.png binary
+*.PNG binary
+*.tft binary
+*.HMI binary

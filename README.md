@@ -78,72 +78,103 @@ A more detailed guide on LCD screen firmware update can be found on the [Elegoo 
     dtoverlay=disable-bt
 
 ## Run the KlipperLCD service
-* SSH into your Raspberry Pi
+SSH into your Raspberry Pi (or other SBC), then follow the steps below.
 
-### Klipper socket API
-* Make sure Klipper's API socket is enabled by reading the Klipper arguments.
+### 1. Verify Klipper socket API
+Check that Klipper was started with a UNIX socket:
 
-    Command:
-
-        cat ~/printer_data/systemd/klipper.env
-
-    Response:
-
-        KLIPPER_ARGS="/home/pi/klipper/klippy/klippy.py /home/pi/printer_data/config/printer.cfg -I /home/pi/printer_data/comms/klippy.serial -l /home/pi/printer_data/logs/klippy.log -a /home/pi/printer_data/comms/klippy.sock"
-    
-    The KLIPPER_ARGS should include `-a /home/pi/printer_data/comms/klippy.sock`. If not add it to the klipper.env file!
-
-### Install dependencies
-    sudo apt-get install python3-pip git
-    pip install pyserial
-
-### Get the code
-    git clone https://github.com/joakimtoe/KlipperLCD
-    cd KlipperLCD
-
-### Configure the code
-* Open `main.py` and find the `class KlipperLCD` declaration:
-```python
-class KlipperLCD ():
-    def __init__(self):
-        ...
-        LCD("/dev/ttyAMA0", callback=self.lcd_callback)
-        ...
-        PrinterData('XXXXXX', URL=("127.0.0.1"), klippy_sock='/home/pi/printer_data/comms/klippy.sock')
+```bash
+cat ~/printer_data/systemd/klipper.env
 ```
-* If your UART is something other than the default `ttyAMA0`, replace the string `"/dev/ttyAMA0"` to match your UART selection. 
 
+`KLIPPER_ARGS` must include:
 
-    > **_Note_**: If using a USB to UART converter to connect your screen to Klipper, the converter usually shows up in Linux as `"/dev/ttyUSB0"`.
+```text
+-a /home/<user>/printer_data/comms/klippy.sock
+```
 
+### 2. Install system dependencies
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip git rsync podman
+```
 
-* Or if your Klipper socket is called something else, replace `klippy_sock` string `"/home/pi/printer_data/comms/klippy.sock"` with the path and name of your klipper socket file.
+### 3. Get the code
+```bash
+git clone https://github.com/joakimtoe/KlipperLCD
+cd KlipperLCD
+```
 
-### Run the code
-Once the LCD touch screen is wired to the Raspberry Pi, Klipper socket API is enabled and the KlipperLCD class is configured according to your wiring you can fire up the code!
+### 4. Configure environment
+Service/runtime settings are read from:
 
-    python3 main.py
+```text
+~/.config/KlipperLCD/service.env
+```
 
-Congratulations! You can now use the touch screen!
+Create/update this file from template:
 
-### Run KlipperLCD service at boot
-If the path of `main.py` is something else than `/home/pi/KlipperLCD/main.py` or your user is not `pi`. Open and edit `KlipperLCD.service` to fit your needs.
+```bash
+make config
+```
 
-Enable the service to automatically start at boot:
+Key variables:
+- `KLIPPERLCD_LCD_PORT` (for USB-UART typically `/dev/ttyUSB0`)
+- `KLIPPERLCD_LCD_BAUDRATE`
+- `KLIPPERLCD_KLIPPY_SOCK`
+- `KLIPPERLCD_MOONRAKER_URL`
+- `KLIPPERLCD_API_KEY`
+- `KLIPPERLCD_UPDATE_INTERVAL`
+- `KLIPPERLCD_LOG_LEVEL`
 
-    sudo chmod +x main.py
+### 5. Install and enable systemd service
+```bash
+make install
+```
 
-    sudo chmod +x KlipperLCD.service
+This command:
+- creates service venv (`~/KlipperLCD-venv` by default),
+- installs package and dependencies,
+- generates `/etc/systemd/system/KlipperLCD.service` from `service.template`,
+- enables and starts the service.
 
-    sudo mv KlipperLCD.service /etc/systemd/system/KlipperLCD.service
+### 6. Update / restart / remove
+```bash
+make upgrade      # reinstall package + restart service
+make uninstall    # disable service + remove unit/venv
+```
 
-    sudo chmod 644 /etc/systemd/system/KlipperLCD.service
+### 7. Development run (without systemd)
+```bash
+make venv
+source .venv/bin/activate
+python3 main.py
+```
 
-    sudo systemctl daemon-reload
+### 8. Run tests
+Local test run in repository venv:
 
-    sudo systemctl enable KlipperLCD.service
+```bash
+make test
+```
 
-    sudo reboot
+Containerized test run with Podman:
+
+```bash
+make test-container
+```
+
+Current test modules:
+- `tests/test_app_logic.py` (application event routing, thumbnail flow, env parsing)
+- `tests/test_lcd_logic.py` (LCD handlers, file navigation/selection, UI-side events)
+- `tests/test_printer_logic.py` (printer command formatting, REST/GCode routing, progress math)
+
+### Makefile commands
+Show available commands any time:
+
+```bash
+make help
+```
 
 ## Console
 The console is enabled by default and can be accessed by clicking center top of the main screen or by clicking the thumbnail area while printing.
