@@ -10,14 +10,14 @@ Take a look at this python service for the Elegoo Neptune 3 Pro LCD! Running tog
     <img src="img/about_screen.PNG" height="400">
 </p>
 
-## Whats needed?
-* A Elegoo Neptune 3 Pro with LCD screen.
+## What's needed?
+* An Elegoo Neptune 3 Pro with LCD screen.
 * A Raspberry Pi or similar SBC to run Klipper. I suggest using the [Klipper Installation And Update Helper (KIAUH)](https://github.com/dw-0/kiauh) to setup and install Klipper, Moonraker and the web user interface of choice ([Fluidd](https://docs.fluidd.xyz/)/[Mainsail](https://docs.mainsail.xyz/)).
-* Some re-wiring of the LCD screen to connect it to one of the UARTs availible on your Raspberry Pi / SBC or through a USB to UART converter.
+* Some re-wiring of the LCD screen to connect it to one of the UARTs available on your Raspberry Pi / SBC or through a USB to UART converter.
 * Then you can follow this guide to enable your Neptune 3 Pro touch screen!
 
 ## Wire the LCD
-When wiring your screen, you can either wire it directly to one of your Raspberry Pi / SBC availible UARTs or you can wire it through a USB to UART converter. Both options are described below, pick the option that suits your needs.
+When wiring your screen, you can either wire it directly to one of your Raspberry Pi / SBC available UARTs or through a USB to UART converter. Both options are described below.
 
 ### To a Raspberry Pi UART
 1. Remove the back-cover of the LCD by unscrewing the four screws.
@@ -51,12 +51,12 @@ Quite simple, just remember to cross RX and TX on the LCD and the USB/UART HW.
 </p>
 
 ## Update the LCD screen firmware
-1. Copy the LCD screen firmware `LCD/20240125.tft` to the root of a FAT32 formatted micro-SD card.
+1. Copy the LCD screen firmware `LCD/20240129.tft` to the root of a FAT32 formatted micro-SD card.
 2. Make sure the LCD screen is powered off.
 3. Insert the micro-SD card into the LCD screens SD card holder. Back-cover needs to be removed.
 4. Power on the LCD screen and wait for screen to say `Update Successed!`
 
-A more detailed guide on LCD screen firmware update can be found on the [Elegoo web-pages](https://www.elegoo.com/blogs/3d-printing/elegoo-neptune-3-pro-plus-max-fdm-3d-printer-support-files).
+A more detailed guide on LCD firmware updates can be found on the [Elegoo support page](https://www.elegoo.com/blogs/3d-printing/elegoo-neptune-3-pro-plus-max-fdm-3d-printer-support-files).
 
 
 ## Enable the UART
@@ -96,12 +96,18 @@ cat ~/printer_data/systemd/klipper.env
 ### 2. Install system dependencies
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip git rsync podman
+sudo apt-get install -y python3 python3-venv python3-pip git rsync
+```
+
+If you want to run containerized tests (`make test-container`), also install Podman:
+
+```bash
+sudo apt-get install -y podman
 ```
 
 ### 3. Get the code
 ```bash
-git clone https://github.com/joakimtoe/KlipperLCD
+git clone https://github.com/ImpBY/KlipperLCD.git
 cd KlipperLCD
 ```
 
@@ -122,10 +128,14 @@ Key variables:
 - `KLIPPERLCD_LCD_PORT` (for USB-UART typically `/dev/ttyUSB0`)
 - `KLIPPERLCD_LCD_BAUDRATE`
 - `KLIPPERLCD_KLIPPY_SOCK`
-- `KLIPPERLCD_MOONRAKER_URL`
+- `KLIPPERLCD_MOONRAKER_URL` (host or IP only, without `http://`)
 - `KLIPPERLCD_API_KEY`
 - `KLIPPERLCD_UPDATE_INTERVAL`
 - `KLIPPERLCD_LOG_LEVEL`
+
+Notes:
+- The current implementation connects to Moonraker on port `80` internally, so `KLIPPERLCD_MOONRAKER_URL` should resolve to a host where Moonraker is reachable on port `80`.
+- Keep `KLIPPERLCD_API_KEY` synchronized with your Moonraker API key.
 
 ### 5. Install and enable systemd service
 ```bash
@@ -133,9 +143,10 @@ make install
 ```
 
 This command:
-- creates service venv (`~/KlipperLCD-venv` by default),
+- creates service venv (`~/<repo-dir-name>-venv`, for this repo: `~/KlipperLCD-venv`),
 - installs package and dependencies,
-- generates `/etc/systemd/system/KlipperLCD.service` from `service.template`,
+- uses service config from `~/.config/<repo-dir-name>/service.env` (for this repo: `~/.config/KlipperLCD/service.env`),
+- generates `/etc/systemd/system/<repo-dir-name>.service` from `service.template` (for this repo: `/etc/systemd/system/KlipperLCD.service`),
 - enables and starts the service.
 
 ### 6. Update / restart / remove
@@ -149,6 +160,8 @@ make uninstall    # disable service + remove unit/venv
 make venv
 source .venv/bin/activate
 python3 main.py
+# or, after venv install:
+klipperlcd
 ```
 
 ### 8. Run tests
