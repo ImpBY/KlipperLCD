@@ -11,7 +11,7 @@ import logging
 import math
 from array import array
 from io import BytesIO
-from threading import Thread
+from threading import Lock, Thread
 from time import sleep
 
 from PIL import Image
@@ -229,6 +229,9 @@ class LCD:
         self.askprint = False
         self._read_thread = None
         self._serial_wait_logged = False
+        # Serialize writes: LCD frames are built from multiple parts and are
+        # written from several threads (periodic update, RX handlers, thumbnail).
+        self._write_lock = Lock()
         # Make sure the serial port closes when you quit the program.
         atexit.register(self._atexit)
 
@@ -582,9 +585,10 @@ class LCD:
             _hex_preview(framed),
         )
         try:
-            self.ser.write(dat)
-            if eol:
-                self.ser.write(bytearray([0xFF, 0xFF, 0xFF]))
+            # Single locked write keeps payload + terminator atomic across
+            # threads and avoids an extra syscall per command.
+            with self._write_lock:
+                self.ser.write(framed)
         except (serial.SerialException, OSError) as e:
             if not self.running:
                 return
@@ -602,41 +606,31 @@ class LCD:
         # Clear screen
         self.clear_thumbnail()
 
-        # Open as image
+        # Open as image; normalize mode so RGB/RGBA/palette thumbnails all work.
         im = Image.open(BytesIO(img))
-        width, height = im.size
-        if width != 160 or height != 160:
+        if im.size != (160, 160):
             im = im.resize((160, 160))
-            width, height = im.size
-
-        pixels = im.load()
+        im = im.convert("RGB")
+        width, height = im.size
 
         color16 = array('H')
-        for i in range(height): #Height
-            for j in range(width): #Width
-                r, g, b, a = pixels[j, i]
-                r = r >> 3
-                g = g >> 2
-                b = b >> 3
-                rgb = (r << 11) | (g << 5) | b
-                if rgb == 0x0000:
-                    rgb = 0x4AF0
-                color16.append(rgb)
+        for r, g, b in im.getdata():
+            rgb = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+            if rgb == 0x0000:
+                rgb = 0x4AF0
+            color16.append(rgb)
 
         output_data = bytearray(height * width * 10)
-        result_int = lib_col_pic.ColPic_EncodeStr(color16, width, height, output_data, width * height * 10, 1024)
+        encoded_len = lib_col_pic.ColPic_EncodeStr(color16, width, height, output_data, width * height * 10, 1024)
+        if encoded_len <= 0:
+            _log("Thumbnail encoding failed", level=logging.ERROR)
+            return
 
+        # Encoded stream contains no zero bytes (values are offset by +48),
+        # so slicing by encoded length replaces the old byte-filter loop.
         each_max = 512
-        j = 0
-        k = 0
-        result = [bytearray()]
-        for i in range(len(output_data)):
-            if output_data[i] != 0:
-                if j % each_max == 0:
-                    result.append(bytearray())
-                    k += 1
-                result[k].append(output_data[i])
-                j += 1
+        encoded = output_data[:encoded_len]
+        result = [encoded[i:i + each_max] for i in range(0, len(encoded), each_max)]
 
         # Send image to screen
         self.error_from_lcd = True 
@@ -806,9 +800,12 @@ class LCD:
 
             if self.rx_state == RX_STATE_IDLE:
                 if incomingByte[0] == FHONE:
+                    # Restart frame sync: keep exactly one header byte so a
+                    # duplicated 0x5A cannot shift the length/command offsets.
+                    self.rx_buf.clear()
                     self.rx_buf.extend(incomingByte)
                 elif incomingByte[0] == FHTWO:
-                    if self.rx_buf[0] == FHONE:
+                    if len(self.rx_buf) == 1 and self.rx_buf[0] == FHONE:
                         self.rx_buf.extend(incomingByte)
                         self.rx_state = RX_STATE_READ_LEN
                     else:
@@ -820,9 +817,17 @@ class LCD:
                     _log("Unexpected data received: 0x%02x" % incomingByte[0], level=logging.WARNING)
 
             elif self.rx_state == RX_STATE_READ_LEN:
-                # Frame length byte follows header.
-                self.rx_buf.extend(incomingByte)
-                self.rx_state = RX_STATE_READ_DAT
+                # Frame length byte follows header; must cover cmd + payload.
+                if incomingByte[0] < 2:
+                    _log(
+                        "Invalid frame length received: %d" % incomingByte[0],
+                        level=logging.WARNING,
+                    )
+                    self.rx_buf.clear()
+                    self.rx_state = RX_STATE_IDLE
+                else:
+                    self.rx_buf.extend(incomingByte)
+                    self.rx_state = RX_STATE_READ_DAT
 
             elif self.rx_state == RX_STATE_READ_DAT:
                 self.rx_buf.extend(incomingByte)
@@ -875,11 +880,14 @@ class LCD:
             addr = dat[0]
             addr = (addr << 8) | dat[1]
             bytelen = dat[2]
-            data = [32]
-            for i in range (0, bytelen, 2):
-                idx = int(i / 2)
-                data[idx] = dat[3 + i]
-                data[idx] = (data[idx] << 8) | dat[4 + i]
+            data = []
+            for i in range(0, bytelen, 2):
+                if 4 + i >= len(dat):
+                    break
+                data.append((dat[3 + i] << 8) | dat[4 + i])
+            if not data:
+                # Preserve legacy placeholder so handlers can index data[0].
+                data = [32]
             logger.debug(
                 "LCD RX READVAR decoded: addr=0x%04X bytelen=%d words=%r",
                 addr,

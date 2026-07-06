@@ -73,7 +73,7 @@ class KlipperLCD:
         # Wait until klippy status is available while showing boot progress.
         progress_bar = 1
         while self.printer.update_variable() is False:
-            progress_bar += 5
+            progress_bar = min(progress_bar + 5, 100)
             self.lcd.boot_progress(progress_bar)
             time.sleep(1)
 

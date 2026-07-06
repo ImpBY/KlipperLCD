@@ -122,14 +122,21 @@ class KlippySocket:
         self.poll = select.poll()
         self.stop_threads = False
         self.poll.register(self.webhook_socket, select.POLLIN | select.POLLHUP)
+        # Wakeup pair lets queue_line interrupt poll() so queued commands are
+        # sent immediately instead of waiting for the next poll timeout.
+        self._wake_r, self._wake_w = socket.socketpair()
+        self._wake_r.setblocking(0)
+        self._wake_w.setblocking(0)
+        self.poll.register(self._wake_r, select.POLLIN)
         self.socket_data = ""
-        self.t = threading.Thread(target=self.polling, daemon=True)
         self.callback = callback
         self.lines = []
-        self.t.start()
-        atexit.register(self.klippyExit)
         self._closed = False
         self._socket_trace = True
+        # All attributes used by the polling thread must be set before start().
+        self.t = threading.Thread(target=self.polling, daemon=True)
+        self.t.start()
+        atexit.register(self.klippyExit)
 
     def klippyExit(self):
         if self._closed:
@@ -145,6 +152,16 @@ class KlippySocket:
             self.webhook_socket.close()
         except Exception:
             pass
+        try:
+            self.poll.unregister(self._wake_r)
+        except Exception:
+            pass
+        for sock in (getattr(self, "_wake_r", None), getattr(self, "_wake_w", None)):
+            try:
+                if sock is not None:
+                    sock.close()
+            except Exception:
+                pass
         if self.t.is_alive():
             self.t.join(timeout=2.0)
 
@@ -208,6 +225,12 @@ class KlippySocket:
             return
         if not data:
             self.connected = False
+            # Unregister so poll() does not spin on a dead socket until the
+            # main loop notices the disconnect and rebuilds the connection.
+            try:
+                self.poll.unregister(self.webhook_socket)
+            except Exception:
+                pass
             _log("Socket closed", level=logging.WARNING)
             return
         parts = data.split('\x03')
@@ -225,35 +248,49 @@ class KlippySocket:
             self.lines.append(line)
             if self._socket_trace:
                 logger.debug("KLIPPY TX queue size=%d line=%r", len(self.lines), line)
+        try:
+            self._wake_w.send(b"\x00")
+        except (OSError, socket.error):
+            pass
 
     def send_line(self):
-        if len(self.lines) == 0:
-            return
-        line = self.lines.pop(0).strip()
-        if not line or line.startswith('#'):
-            return
-        try:
-            m = json.loads(line)
-        except JSONDecodeError:
-            _log("ERROR: Unable to parse line", level=logging.ERROR)
-            return
-        cm = json.dumps(m, separators=(',', ':'))
-        wdm = '{}\x03'.format(cm)
-        try:
-            self.webhook_socket.send(wdm.encode())
-            if self._socket_trace:
-                logger.debug("KLIPPY TX raw=%s", _hex_preview(wdm.encode()))
-        except socket.error as e:
-            self.connected = False
-            _log("Socket send error: %s" % e, level=logging.ERROR)
+        # Drain the whole queue; stop early on transport failure.
+        while self.lines:
+            line = self.lines.pop(0).strip()
+            if not line or line.startswith('#'):
+                continue
+            try:
+                m = json.loads(line)
+            except JSONDecodeError:
+                _log("ERROR: Unable to parse line", level=logging.ERROR)
+                continue
+            cm = json.dumps(m, separators=(',', ':'))
+            wdm = '{}\x03'.format(cm)
+            try:
+                self.webhook_socket.send(wdm.encode())
+                if self._socket_trace:
+                    logger.debug("KLIPPY TX raw=%s", _hex_preview(wdm.encode()))
+            except socket.error as e:
+                self.connected = False
+                _log("Socket send error: %s" % e, level=logging.ERROR)
+                return
 
     def polling(self):
+        wake_fd = self._wake_r.fileno()
         while True:
             if self.stop_threads:
                 break
             res = self.poll.poll(1000.)
+            if self.stop_threads:
+                break
             for fd, event in res:
-                self.process_socket()
+                if fd == wake_fd:
+                    try:
+                        self._wake_r.recv(4096)
+                    except (OSError, socket.error):
+                        pass
+                else:
+                    self.process_socket()
             with self.lock:
                 self.send_line()
 
@@ -618,27 +655,28 @@ class PrinterData:
             self.ks.klippyExit()
             self.klippy_start()
             return False
-        query = '/printer/objects/query?extruder&heater_bed&gcode_move&fan&print_stats&motion_report&toolhead'
+        # Single combined query: virtual_sdcard/print_stats are fetched together
+        # with the rest of the state to avoid a second HTTP round-trip per cycle.
+        query = '/printer/objects/query?extruder&heater_bed&gcode_move&fan&print_stats&virtual_sdcard&toolhead'
         try:
             resp = self.getREST(query)
             if not resp or 'result' not in resp:
                 return False
             data = resp['result']['status']
+            self.gcm = data['gcode_move']
+            self.z_offset = self.gcm['homing_origin'][2] #z offset
+            self.flow_percentage = self.gcm['extrude_factor'] * 100 #flow rate percent
+            self.absolute_moves = self.gcm['absolute_coordinates'] #absolute or relative
+            self.absolute_extrude = self.gcm['absolute_extrude'] #absolute or relative
+            self.speed = self.gcm['speed'] #current speed in mm/s
+            self.print_speed = self.gcm['speed_factor'] * 100 #print speed percent
+            self.bed = data['heater_bed'] #temperature, target
+            self.extruder = data['extruder'] #temperature, target
+            self.fan = data['fan']
+            self.toolhead = data['toolhead']
         except Exception:
             _log("Exception 431", level=logging.ERROR)
             return False
-
-        self.gcm = data['gcode_move']
-        self.z_offset = self.gcm['homing_origin'][2] #z offset
-        self.flow_percentage = self.gcm['extrude_factor'] * 100 #flow rate percent
-        self.absolute_moves = self.gcm['absolute_coordinates'] #absolute or relative
-        self.absolute_extrude = self.gcm['absolute_extrude'] #absolute or relative
-        self.speed = self.gcm['speed'] #current speed in mm/s
-        self.print_speed = self.gcm['speed_factor'] * 100 #print speed percent
-        self.bed = data['heater_bed'] #temperature, target
-        self.extruder = data['extruder'] #temperature, target
-        self.fan = data['fan']
-        self.toolhead = data['toolhead']
         Update = False
         try:
             if self.thermalManager['temp_bed']['celsius'] != int(self.bed['temperature']):
@@ -677,13 +715,13 @@ class PrinterData:
         except:
             # Missing keys can happen transiently while Klipper is starting up.
             pass
-        try:
-            job_resp = self.getREST('/printer/objects/query?virtual_sdcard&print_stats')
-            if not job_resp or 'result' not in job_resp:
-                return False
-            self.job_Info = job_resp['result']['status']
-        except Exception:
-            _log("Exception 470", level=logging.ERROR)
+        if 'virtual_sdcard' in data and 'print_stats' in data:
+            self.job_Info = {
+                'virtual_sdcard': data['virtual_sdcard'],
+                'print_stats': data['print_stats'],
+            }
+        else:
+            _log("Job info missing in status payload", level=logging.WARNING)
             return False
 
         if self.job_Info:
