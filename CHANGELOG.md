@@ -4,6 +4,13 @@
 
 ### Added
 - `KLIPPERLCD_MOONRAKER_PORT` env variable (default `80`); the Moonraker port is no longer hard-coded.
+- Filament runout sensor toggle on the HMI now works: it sends `SET_FILAMENT_SENSOR SENSOR=<KLIPPERLCD_FILAMENT_SENSOR_NAME> ENABLE=0|1` (new env variable, default `filament_runout_sensor`).
+- Model cooling fan toggle on the settings screen now works (was a stub); toggling on sets the fan to 40%. The print-screen fan toggle uses the same 40% instead of 100%.
+
+### Changed
+- Print file list is sorted newest-first by Moonraker `modified` timestamp (upload time), so the latest file appears in slot 1 of page 1.
+- Light toggle now switches the LED to 5% brightness (was 50%); `set_led` accepts brightness percent and emits `SET_LED ... WHITE=<0.00-1.00>`.
+- The settings Leveling button now runs the full `BED_LEVELING` Klipper macro (tap + mesh into profile `default` + `SAVE_CONFIG` with Klipper restart) instead of the interactive `PROBE_CALIBRATE`/TESTZ flow.
 
 ### Fixed
 - HMI file listing pagination: file names are now written to the per-page label slots (`file1.t0..t4`, `file2.t5..t9`, ... up to 25 slots) instead of flat `file1.tN`, so pages 2+ show file names again. File selection uses the absolute slot index reported by the HMI, and the selected-file highlight targets the correct page component. Stale labels are cleared on every listing refresh.

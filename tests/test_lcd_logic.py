@@ -44,15 +44,58 @@ def test_power_continue_updates_recovery_flag():
     assert "multiset.plrbutton.val=0" in writes
 
 
-def test_led2_alt_code_toggles_light():
+def test_led2_alt_code_toggles_light_at_5_percent():
     lcd, events, writes = _build_lcd()
 
     lcd._BedLevelFun([0x07])
     lcd._BedLevelFun([0x07])
 
-    assert events == [(lcd.evt.LIGHT, 128), (lcd.evt.LIGHT, 0)]
+    assert events == [(lcd.evt.LIGHT, 5), (lcd.evt.LIGHT, 0)]
     assert "status_led2=1" in writes
     assert "status_led2=0" in writes
+
+
+def test_settings_fan_toggle_switches_between_40_and_0():
+    lcd, events, _ = _build_lcd()
+    lcd.printer.fan = None  # no status snapshot yet
+
+    lcd._SettingScreen([0x07])
+    lcd._SettingScreen([0x07])
+
+    assert events == [(lcd.evt.FAN, 40), (lcd.evt.FAN, 0)]
+
+
+def test_adjustment_fan_toggle_uses_40_percent():
+    lcd, events, _ = _build_lcd()
+    lcd.printer.fan = 0
+
+    lcd._Adjustment([0x03])
+
+    assert events == [(lcd.evt.FAN, 40)]
+    assert lcd.printer.fan == 40
+
+
+def test_filament_check_toggle_emits_sensor_events():
+    lcd, events, _ = _build_lcd()
+
+    lcd._FilamentCheck([0x00])
+    lcd._FilamentCheck([0x01])
+    lcd._FilamentCheck([0x7F])  # unknown code ignored
+
+    assert events == [
+        (lcd.evt.FILAMENT_SENSOR, False),
+        (lcd.evt.FILAMENT_SENSOR, True),
+    ]
+    assert lcd.filament_sensor_enabled is True
+
+
+def test_settings_leveling_button_emits_bed_mesh_event():
+    lcd, events, writes = _build_lcd()
+
+    lcd._SettingScreen([0x01])
+
+    assert events == [(lcd.evt.BED_MESH, None)]
+    assert writes[-1] == "page main"
 
 
 def test_file_slots_rendered_across_hmi_pages():

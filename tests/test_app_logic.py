@@ -144,6 +144,35 @@ def test_lcd_callback_probe_complete_sends_expected_gcode():
     ]
 
 
+def test_lcd_callback_bed_mesh_runs_bed_leveling_macro():
+    app = _new_app()
+    evt = LCDEvents()
+    sent = []
+    app.lcd = SimpleNamespace(evt=evt)
+    app.printer = SimpleNamespace(sendGCode=lambda cmd: sent.append(cmd))
+
+    app.lcd_callback(evt.BED_MESH)
+
+    assert sent == ["BED_LEVELING"]
+
+
+def test_lcd_callback_filament_sensor_toggles_klipper_sensor():
+    app = _new_app()
+    evt = LCDEvents()
+    sent = []
+    app.lcd = SimpleNamespace(evt=evt)
+    app.printer = SimpleNamespace(sendGCode=lambda cmd: sent.append(cmd))
+    app.filament_sensor = "filament_runout_sensor"
+
+    app.lcd_callback(evt.FILAMENT_SENSOR, True)
+    app.lcd_callback(evt.FILAMENT_SENSOR, False)
+
+    assert sent == [
+        "SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=1",
+        "SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=0",
+    ]
+
+
 def test_lcd_callback_accel_to_decel_converts_percent_to_ratio():
     app = _new_app()
     evt = LCDEvents()

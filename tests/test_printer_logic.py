@@ -25,6 +25,25 @@ def test_progress_duration_and_remain_active_and_inactive():
     assert p.remain() == 0
 
 
+def test_get_files_sorts_newest_first():
+    p = _new_printer()
+    p.files = None
+    p.getREST = lambda path: {
+        "result": [
+            {"path": "old.gcode", "modified": 100.0},
+            {"path": "newest.gcode", "modified": 300.0},
+            {"path": "mid.gcode", "modified": 200.0},
+            {"path": "no_ts.gcode"},
+        ]
+    }
+
+    names = p.GetFiles(True)
+
+    assert names == ["newest.gcode", "mid.gcode", "old.gcode", "no_ts.gcode"]
+    # self.files stays aligned with the returned names for index-based selection.
+    assert [fl["path"] for fl in p.files] == names
+
+
 def test_open_and_print_file_uses_selected_path():
     p = _new_printer()
     calls = []
@@ -66,17 +85,19 @@ def test_set_print_speed_and_flow_emit_expected_gcode():
     assert sent == ["M220 S120", "M221 S95"]
 
 
-def test_set_led_translates_to_on_and_off_gcode():
+def test_set_led_translates_percent_to_brightness_gcode():
     p = _new_printer()
     sent = []
     p.sendGCode = lambda cmd: sent.append(cmd)
 
-    p.set_led(128)
+    p.set_led(5)
     p.set_led(0)
+    p.set_led(150)  # clamped to 100%
 
     assert sent == [
-        "SET_LED LED=top_LEDs WHITE=0.5 SYNC=0 TRANSMIT=1",
-        "SET_LED LED=top_LEDs WHITE=0 SYNC=0 TRANSMIT=1",
+        "SET_LED LED=top_LEDs WHITE=0.05 SYNC=0 TRANSMIT=1",
+        "SET_LED LED=top_LEDs WHITE=0.00 SYNC=0 TRANSMIT=1",
+        "SET_LED LED=top_LEDs WHITE=1.00 SYNC=0 TRANSMIT=1",
     ]
 
 

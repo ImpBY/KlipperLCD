@@ -135,6 +135,7 @@ Key variables:
 - `KLIPPERLCD_API_KEY`
 - `KLIPPERLCD_UPDATE_INTERVAL`
 - `KLIPPERLCD_LOG_LEVEL`
+- `KLIPPERLCD_FILAMENT_SENSOR_NAME` (Klipper filament sensor name for the HMI runout-sensor toggle; default `filament_runout_sensor`)
 
 Notes:
 - Moonraker is reached at `http://<KLIPPERLCD_MOONRAKER_URL>:<KLIPPERLCD_MOONRAKER_PORT>`; adjust the port if your Moonraker listens on a non-default one (e.g. `7125`).

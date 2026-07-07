@@ -639,7 +639,11 @@ class PrinterData:
             try:
                 resp = self.getREST('/server/files/list')
                 if resp and "result" in resp:
-                    self.files = resp["result"]
+                    files = resp["result"]
+                    # Newest first: "modified" is the upload time for gcode
+                    # files, so the latest file lands on page 1, slot 1.
+                    files.sort(key=lambda fl: fl.get("modified", 0), reverse=True)
+                    self.files = files
             except Exception:
                 _log("Exception 418", level=logging.ERROR)
         if not self.files:
@@ -787,11 +791,10 @@ class PrinterData:
         self.sendGCode('M221 S%d' % fl)
 
     def set_led(self, led):
+        # led is brightness in percent (0..100).
         self.led_percentage = led
-        if(led > 0):
-            self.sendGCode('SET_LED LED=top_LEDs WHITE=0.5 SYNC=0 TRANSMIT=1')
-        else:
-            self.sendGCode('SET_LED LED=top_LEDs WHITE=0 SYNC=0 TRANSMIT=1')
+        brightness = max(0.0, min(led / 100.0, 1.0))
+        self.sendGCode('SET_LED LED=top_LEDs WHITE=%.2f SYNC=0 TRANSMIT=1' % brightness)
 
     def set_fan(self, fan):
         self.fan_percentage = fan

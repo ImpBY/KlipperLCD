@@ -53,6 +53,9 @@ class KlipperLCD:
             "KLIPPERLCD_KLIPPY_SOCK", "/home/pi/printer_data/comms/klippy.sock"
         )
         self.update_interval = _env_float("KLIPPERLCD_UPDATE_INTERVAL", 2.0)
+        self.filament_sensor = os.getenv(
+            "KLIPPERLCD_FILAMENT_SENSOR_NAME", "filament_runout_sensor"
+        )
 
         # Initialize transport endpoints.
         self.lcd = LCD(self.lcd_port, baud=self.lcd_baud, callback=self.lcd_callback)
@@ -377,7 +380,17 @@ class KlipperLCD:
             self._event_tx_log("printer.sendGCode", "SAVE_CONFIG")
             self.printer.sendGCode("SAVE_CONFIG")
         elif evt == self.lcd.evt.BED_MESH:
-            pass
+            # Full leveling sequence: tap + mesh into profile "default",
+            # then SAVE_CONFIG (restarts Klipper). Handled by the config macro.
+            self._event_tx_log("printer.sendGCode", "BED_LEVELING")
+            self.printer.sendGCode("BED_LEVELING")
+        elif evt == self.lcd.evt.FILAMENT_SENSOR:
+            gcode = "SET_FILAMENT_SENSOR SENSOR=%s ENABLE=%d" % (
+                self.filament_sensor,
+                1 if data else 0,
+            )
+            self._event_tx_log("printer.sendGCode", gcode)
+            self.printer.sendGCode(gcode)
         elif evt == self.lcd.evt.LIGHT:
             self._event_tx_log("printer.set_led", data)
             self.printer.set_led(data)

@@ -72,6 +72,11 @@ PETG  = 2
 TPU   = 3
 PROBE = 4
 
+# Model-cooling fan speed applied when toggled on from the UI (percent).
+FAN_TOGGLE_ON_PERCENT = 40
+# Chamber light brightness applied when toggled on from the UI (percent).
+LIGHT_ON_PERCENT = 5
+
 
 class _printerData:
     """Internal printer state snapshot consumed by LCD update paths."""
@@ -132,6 +137,7 @@ class LCDEvents:
     SQUARE_CORNER_VELOCITY = 27
     THUMBNAIL      = 28
     CONSOLE        = 29
+    FILAMENT_SENSOR = 30
 
 
 class LCD:
@@ -217,6 +223,7 @@ class LCD:
         self.z_offset_unit = None
         self.light = False
         self.power_loss_recovery_enabled = True
+        self.filament_sensor_enabled = True
         # Adjusting speed
         self.speed_adjusting = None
         self.speed_unit = 10
@@ -314,9 +321,9 @@ class LCD:
                 0x11: "cool.edit_probe",
             },
             0x103E: {
-                0x01: "settings.start_probe",
+                0x01: "settings.bed_leveling",
                 0x06: "settings.motor_release",
-                0x07: "settings.fan_control_stub",
+                0x07: "settings.fan_toggle",
                 0x08: "settings.unknown_stub",
                 0x09: "settings.preheat_page",
                 0x0A: "settings.filament_page",
@@ -358,6 +365,12 @@ class LCD:
             0x104C: {
                 0x01: "axis.move_z_plus",
                 0x02: "axis.move_z_minus",
+            },
+            0x105E: {
+                0x00: "filament_sensor.off",
+                0x01: "filament_sensor.on",
+                0x02: "filament_sensor.off",
+                0x03: "filament_sensor.on",
             },
             0x1056: {
                 0x01: "filament.load",
@@ -974,12 +987,12 @@ class LCD:
         elif data[0] == 0x02:
             self.write("page printpause")
         elif data[0] == 0x03:
-            if self.printer.fan > 0:
+            if (self.printer.fan or 0) > 0:
                 self.printer.fan = 0
                 self.callback(self.evt.FAN, 0)
             else:
-                self.printer.fan = 100
-                self.callback(self.evt.FAN, 100)
+                self.printer.fan = FAN_TOGGLE_ON_PERCENT
+                self.callback(self.evt.FAN, FAN_TOGGLE_ON_PERCENT)
         elif data[0] == 0x05:
             _log("Filament tab")
             self.speed_adjusting = None
@@ -1250,16 +1263,20 @@ class LCD:
 
     def _SettingScreen(self, data):
         if data[0] == 0x01:
-            self.callback(self.evt.PROBE)
-            self.write("page autohome")
-            self.write("leveling.va1.val=1")
-
+            # Full bed leveling is delegated to the host-side flow (Klipper
+            # macro): tap + mesh into profile "default" + SAVE_CONFIG restart.
+            self.callback(self.evt.BED_MESH)
+            self.write("page main")
         elif data[0] == 0x06: # Motor release
             self.callback(self.evt.MOTOR_OFF)
-        elif data[0] == 0x07: # Fan Control
-
-            pass
-        elif data[0] == 0x08: 
+        elif data[0] == 0x07: # Model cooling fan toggle
+            if (self.printer.fan or 0) > 0:
+                self.printer.fan = 0
+                self.callback(self.evt.FAN, 0)
+            else:
+                self.printer.fan = FAN_TOGGLE_ON_PERCENT
+                self.callback(self.evt.FAN, FAN_TOGGLE_ON_PERCENT)
+        elif data[0] == 0x08:
             _log("What is this???")
             pass
         elif data[0] == 0x09: # 
@@ -1421,8 +1438,19 @@ class LCD:
     def _SelectLanguage(self, data):    
         _log("_SelectLanguage: Not recognised %d" % data[0])
 
-    def _FilamentCheck(self, data):     
-        _log("_FilamentCheck: Not recognised %d" % data[0])
+    def _FilamentCheck(self, data):
+        # Filament runout sensor toggle; explicit state codes follow the
+        # same convention as the power-loss recovery switch.
+        code = data[0]
+        if code in (0x00, 0x02):
+            enabled = False
+        elif code in (0x01, 0x03):
+            enabled = True
+        else:
+            _log("_FilamentCheck: Not recognised %d" % code, level=logging.WARNING)
+            return
+        self.filament_sensor_enabled = enabled
+        self.callback(self.evt.FILAMENT_SENSOR, enabled)
 
     def _PowerContinuePrint(self, data):
         code = data[0]
@@ -1447,7 +1475,7 @@ class LCD:
         else:
             self.light = True
             self.write("status_led2=1")
-            self.callback(self.evt.LIGHT, 128)
+            self.callback(self.evt.LIGHT, LIGHT_ON_PERCENT)
 
     def _PrintSelectMode(self, data):   
         _log("_PrintSelectMode: Not recognised %d" % data[0])
