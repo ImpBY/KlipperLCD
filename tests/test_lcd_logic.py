@@ -89,6 +89,14 @@ def test_filament_check_toggle_emits_sensor_events():
     assert lcd.filament_sensor_enabled is True
 
 
+def test_settings_filament_sensor_button_requests_toggle():
+    lcd, events, _ = _build_lcd()
+
+    lcd._SettingScreen([0x08])
+
+    assert events == [(lcd.evt.FILAMENT_SENSOR, None)]
+
+
 def test_settings_leveling_button_emits_bed_mesh_event():
     lcd, events, writes = _build_lcd()
 

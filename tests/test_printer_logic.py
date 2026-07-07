@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from klipperlcd.printer import PrinterData
 
 
@@ -23,6 +25,47 @@ def test_progress_duration_and_remain_active_and_inactive():
     assert p.getPercent() == 0
     assert p.duration() == 0
     assert p.remain() == 0
+
+
+def test_update_variable_reconnects_only_when_klippy_ready():
+    p = _new_printer()
+    calls = []
+    p.ks = SimpleNamespace(connected=False, klippyExit=lambda: calls.append("exit"))
+    p.klippy_start = lambda: calls.append("start")
+
+    # Klippy still starting up: no reconnect yet.
+    p.getREST = lambda path: {"result": {"state": "startup"}}
+    assert p.update_variable() is False
+    assert calls == []
+
+    # Moonraker unreachable: no reconnect either.
+    p.getREST = lambda path: None
+    assert p.update_variable() is False
+    assert calls == []
+
+    # Klippy ready: reconnect and resubscribe.
+    p.getREST = lambda path: {"result": {"state": "ready"}}
+    assert p.update_variable() is False
+    assert calls == ["exit", "start"]
+
+
+def test_get_filament_sensor_enabled_parses_state():
+    p = _new_printer()
+    p.getREST = lambda path: {
+        "result": {
+            "status": {
+                "filament_switch_sensor filament_runout_sensor": {
+                    "filament_detected": True,
+                    "enabled": False,
+                }
+            }
+        }
+    }
+
+    assert p.get_filament_sensor_enabled("filament_runout_sensor") is False
+
+    p.getREST = lambda path: None
+    assert p.get_filament_sensor_enabled("filament_runout_sensor") is None
 
 
 def test_get_files_sorts_newest_first():

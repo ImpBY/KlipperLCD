@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "klipperlcd"
-version = "0.2.0"
+version = "0.2.1"
 description = "KlipperLCD service for Elegoo Neptune 3 Pro LCD"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -156,13 +156,14 @@ def test_lcd_callback_bed_mesh_runs_bed_leveling_macro():
     assert sent == ["BED_LEVELING"]
 
 
-def test_lcd_callback_filament_sensor_toggles_klipper_sensor():
+def test_lcd_callback_filament_sensor_explicit_state():
     app = _new_app()
     evt = LCDEvents()
     sent = []
     app.lcd = SimpleNamespace(evt=evt)
     app.printer = SimpleNamespace(sendGCode=lambda cmd: sent.append(cmd))
     app.filament_sensor = "filament_runout_sensor"
+    app.filament_sensor_enabled = True
 
     app.lcd_callback(evt.FILAMENT_SENSOR, True)
     app.lcd_callback(evt.FILAMENT_SENSOR, False)
@@ -171,6 +172,42 @@ def test_lcd_callback_filament_sensor_toggles_klipper_sensor():
         "SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=1",
         "SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=0",
     ]
+
+
+def test_lcd_callback_filament_sensor_toggle_uses_klipper_state():
+    app = _new_app()
+    evt = LCDEvents()
+    sent = []
+    app.lcd = SimpleNamespace(evt=evt)
+    app.printer = SimpleNamespace(
+        sendGCode=lambda cmd: sent.append(cmd),
+        get_filament_sensor_enabled=lambda name: True,
+    )
+    app.filament_sensor = "filament_runout_sensor"
+    app.filament_sensor_enabled = True
+
+    app.lcd_callback(evt.FILAMENT_SENSOR, None)
+
+    assert sent == ["SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=0"]
+    assert app.filament_sensor_enabled is False
+
+
+def test_lcd_callback_filament_sensor_toggle_falls_back_to_local_state():
+    app = _new_app()
+    evt = LCDEvents()
+    sent = []
+    app.lcd = SimpleNamespace(evt=evt)
+    app.printer = SimpleNamespace(
+        sendGCode=lambda cmd: sent.append(cmd),
+        get_filament_sensor_enabled=lambda name: None,
+    )
+    app.filament_sensor = "filament_runout_sensor"
+    app.filament_sensor_enabled = False
+
+    app.lcd_callback(evt.FILAMENT_SENSOR, None)
+
+    assert sent == ["SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=1"]
+    assert app.filament_sensor_enabled is True
 
 
 def test_lcd_callback_accel_to_decel_converts_percent_to_ratio():

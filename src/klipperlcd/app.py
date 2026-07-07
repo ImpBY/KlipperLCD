@@ -56,6 +56,8 @@ class KlipperLCD:
         self.filament_sensor = os.getenv(
             "KLIPPERLCD_FILAMENT_SENSOR_NAME", "filament_runout_sensor"
         )
+        # Fallback assumption when the actual sensor state cannot be queried.
+        self.filament_sensor_enabled = True
 
         # Initialize transport endpoints.
         self.lcd = LCD(self.lcd_port, baud=self.lcd_baud, callback=self.lcd_callback)
@@ -385,9 +387,20 @@ class KlipperLCD:
             self._event_tx_log("printer.sendGCode", "BED_LEVELING")
             self.printer.sendGCode("BED_LEVELING")
         elif evt == self.lcd.evt.FILAMENT_SENSOR:
+            if data is None:
+                # Stateless HMI button: toggle relative to the actual Klipper
+                # state (it may also be changed from fluidd), with a local
+                # fallback when the query fails.
+                current = self.printer.get_filament_sensor_enabled(self.filament_sensor)
+                if current is None:
+                    current = self.filament_sensor_enabled
+                target = not current
+            else:
+                target = bool(data)
+            self.filament_sensor_enabled = target
             gcode = "SET_FILAMENT_SENSOR SENSOR=%s ENABLE=%d" % (
                 self.filament_sensor,
-                1 if data else 0,
+                1 if target else 0,
             )
             self._event_tx_log("printer.sendGCode", gcode)
             self.printer.sendGCode(gcode)

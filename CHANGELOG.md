@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-08
+
+### Fixed
+- Filament runout sensor toggle: on-device testing showed the HMI sends `0x103E` code `0x08` (a stateless button), not `0x105E` state codes. The button now toggles relative to the actual Klipper sensor state (queried via `/printer/objects/query`), with a local fallback when the query fails. The `0x105E` handler is kept for other HMI revisions.
+- Klippy subscriptions (toolhead position, gcode output, z-offset/config query) were silently lost when the service connected to the Klippy socket while Klipper was still starting — both after a `SAVE_CONFIG` restart and at cold service start. The socket (re)connect now waits until `/printer/info` reports `state: ready`.
+
+### Changed
+- `REST POST failed` log messages now include the request payload; a client-side timeout on long-running gcode scripts (e.g. `BED_LEVELING`) is logged as a warning ("server keeps running") instead of an error.
+
 ## 2026-07-07
 
 ### Added

@@ -17,7 +17,7 @@ import time
 
 import requests
 from json import JSONDecodeError
-from requests.exceptions import ConnectionError, RequestException
+from requests.exceptions import ConnectionError, ReadTimeout, RequestException
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +390,16 @@ class PrinterData:
         self.op = MoonrakerSocket(URL, port, API_Key)
         _log("Moonraker address: %s" % self.op.base_address, level=logging.INFO)
 
+        # Do not subscribe while Klippy is still starting: subscriptions sent
+        # before the ready state are rejected and silently lost.
+        wait_logged = False
+        while not self.klippy_ready():
+            if not wait_logged:
+                _log("Waiting for Klippy to become ready", level=logging.INFO)
+                wait_logged = True
+            time.sleep(1)
+        if wait_logged:
+            _log("Klippy is ready", level=logging.INFO)
         self.klippy_start()
 
         self.event_loop = asyncio.new_event_loop()
@@ -555,8 +565,20 @@ class PrinterData:
             r = self.op.s.post(url, json=json, timeout=self.op.timeout)
             r.raise_for_status()
             logger.debug("REST POST ok: path=%s status=%s", path, r.status_code)
+        except ReadTimeout:
+            # gcode/script POSTs block until the script completes; a client
+            # timeout on a long-running macro is expected, Moonraker keeps
+            # executing the script server-side.
+            _log(
+                "REST POST client timeout (server keeps running): %s payload=%r"
+                % (url, json),
+                level=logging.WARNING,
+            )
         except RequestException as e:
-            _log("REST POST failed: %s (%s)" % (url, e), level=logging.ERROR)
+            _log(
+                "REST POST failed: %s payload=%r (%s)" % (url, json, e),
+                level=logging.ERROR,
+            )
 
     def postREST(self, path, json):
         logger.debug("Sending REST command: path=%s payload=%r", path, json)
@@ -634,6 +656,19 @@ class PrinterData:
                     macros.append(macro)
         return macros    
 
+    def get_filament_sensor_enabled(self, sensor_name):
+        """Return Klipper filament sensor 'enabled' state, or None if unknown."""
+        obj = 'filament_switch_sensor %s' % sensor_name
+        resp = self.getREST('/printer/objects/query?' + obj.replace(' ', '%20'))
+        try:
+            return bool(resp['result']['status'][obj]['enabled'])
+        except (TypeError, KeyError):
+            _log(
+                "Filament sensor state query failed for %s" % sensor_name,
+                level=logging.WARNING,
+            )
+            return None
+
     def GetFiles(self, refresh=False):
         if not self.files or refresh:
             try:
@@ -653,9 +688,24 @@ class PrinterData:
             names.append(fl["path"])
         return names
 
+    def klippy_ready(self):
+        """Check via Moonraker whether Klippy reached the ready state."""
+        info = self.getREST('/printer/info')
+        try:
+            return info['result']['state'] == 'ready'
+        except (TypeError, KeyError):
+            return False
+
     def update_variable(self):
         # Periodic full-state refresh used by the main update loop.
         if self.ks.connected == False:
+            # Reconnect only once Klippy is ready: subscriptions sent while
+            # Klippy is still starting (e.g. right after SAVE_CONFIG restart)
+            # are rejected and would be silently lost.
+            if not self.klippy_ready():
+                logger.debug("Klippy not ready yet, delaying socket reconnect")
+                return False
+            _log("Klippy ready, reconnecting socket and resubscribing", level=logging.INFO)
             self.ks.klippyExit()
             self.klippy_start()
             return False

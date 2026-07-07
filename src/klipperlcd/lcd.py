@@ -324,7 +324,7 @@ class LCD:
                 0x01: "settings.bed_leveling",
                 0x06: "settings.motor_release",
                 0x07: "settings.fan_toggle",
-                0x08: "settings.unknown_stub",
+                0x08: "settings.filament_sensor_toggle",
                 0x09: "settings.preheat_page",
                 0x0A: "settings.filament_page",
                 0x0B: "settings.main_settings_page",
@@ -1276,9 +1276,8 @@ class LCD:
             else:
                 self.printer.fan = FAN_TOGGLE_ON_PERCENT
                 self.callback(self.evt.FAN, FAN_TOGGLE_ON_PERCENT)
-        elif data[0] == 0x08:
-            _log("What is this???")
-            pass
+        elif data[0] == 0x08: # Filament runout sensor toggle (stateless button)
+            self.callback(self.evt.FILAMENT_SENSOR, None)
         elif data[0] == 0x09: # 
             self.write("page pretemp")
             self.write("pretemp.nozzle.txt=\"%d\"" % self.printer.hotend_target)
