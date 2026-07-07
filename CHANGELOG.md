@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-07
+
+### Added
+- `KLIPPERLCD_MOONRAKER_PORT` env variable (default `80`); the Moonraker port is no longer hard-coded.
+
+### Fixed
+- HMI file listing pagination: file names are now written to the per-page label slots (`file1.t0..t4`, `file2.t5..t9`, ... up to 25 slots) instead of flat `file1.tN`, so pages 2+ show file names again. File selection uses the absolute slot index reported by the HMI, and the selected-file highlight targets the correct page component. Stale labels are cleared on every listing refresh.
+
 ## 2026-07-06
 
 ### Fixed
@@ -10,6 +18,7 @@
 - `KlippySocket` attribute-initialization race: polling-thread attributes are set before the thread starts.
 
 ### Changed
+- Service env file moved from `~/.config/<repo>/service.env` to `~/printer_data/systemd/<repo>.env` to live alongside `klipper.env`/`moonraker.env`; `make config` migrates an existing legacy file automatically.
 - Main update loop now issues a single combined Moonraker query per cycle (previously two; unused `motion_report` dropped).
 - `KlippySocket` drains the full outgoing queue per poll cycle and uses a wakeup socketpair for immediate command transmission (previously up to 1 line/second); a dead socket is unregistered from poll to avoid busy-spinning until reconnect.
 - Thumbnail encoding post-processing replaced a 256 KB per-byte filter loop with slicing by encoded length; pixel access switched to `Image.getdata()`.

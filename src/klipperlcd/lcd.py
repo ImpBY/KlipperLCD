@@ -383,12 +383,10 @@ class LCD:
                 0x03: "file.prev_page_compat",
                 0x0A: "file.back_compat",
             },
+            # Absolute slot index across all HMI file pages (1..MaxFileNumber).
             0x2199: {
-                0x01: "file.select_slot_1",
-                0x02: "file.select_slot_2",
-                0x03: "file.select_slot_3",
-                0x04: "file.select_slot_4",
-                0x05: "file.select_slot_5",
+                code: "file.select_slot_%d" % code
+                for code in range(1, MaxFileNumber + 1)
             },
             0x2200: {
                 0x01: "preset.nozzle_plus",
@@ -450,48 +448,32 @@ class LCD:
     def _file_page_count(self):
         if not self.files:
             return 1
-        return max(1, math.ceil(len(self.files) / 5))
+        return max(1, math.ceil(min(len(self.files), MaxFileNumber) / 5))
 
-    def _file_page_next(self):
-        if self.current_file_page < self._file_page_count():
-            self._show_file_page(self.current_file_page + 1)
-        else:
-            logger.debug("File page next ignored at last page=%d", self.current_file_page)
-            self._show_file_page(self.current_file_page)
+    def _render_file_slots(self):
+        """Fill file label slots on all HMI file pages.
 
-    def _file_page_prev(self):
-        if self.current_file_page > 1:
-            self._show_file_page(self.current_file_page - 1)
-        else:
-            logger.debug("File page prev ignored at first page=%d", self.current_file_page)
-            self._show_file_page(self.current_file_page)
-
-    def _show_file_page(self, page):
-        """Render one logical file page (5 items) on the single LCD file page."""
-        if not self.files:
-            self.current_file_page = 1
-            self.write("page file1")
-            return
-        total_pages = self._file_page_count()
-        page = max(1, min(page, total_pages))
-        self.current_file_page = page
-        start = (page - 1) * 5
-        end = min(start + 5, len(self.files))
-
-        for item_num in range(0, 5):
-            self.write("file1.t%d.txt=\"\"" % item_num)
-        for i in range(start, end):
-            item_num = i - start
-            safe_file = _lcd_safe_text(self.files[i])
-            self.write("file1.t%d.txt=\"%s\"" % (item_num, safe_file))
+        The HMI has built-in pages file1..file5 whose text components are
+        numbered absolutely across pages: file1 holds t0..t4, file2 holds
+        t5..t9, and so on up to MaxFileNumber slots. Page flipping is done
+        by the HMI itself; the host only pre-fills all labels.
+        """
+        files = self.files or []
+        if len(files) > MaxFileNumber:
+            _log(
+                "File list truncated to %d of %d entries"
+                % (MaxFileNumber, len(files)),
+                level=logging.WARNING,
+            )
+        for i in range(MaxFileNumber):
+            page_num = i // 5 + 1
+            name = _lcd_safe_text(files[i]) if i < len(files) else ""
+            self.write("file%d.t%d.txt=\"%s\"" % (page_num, i, name))
         logger.debug(
-            "File page render: page=%d/%d items=%d..%d",
-            self.current_file_page,
-            total_pages,
-            start + 1,
-            end,
+            "File slots rendered: files=%d pages=%d",
+            min(len(files), MaxFileNumber),
+            self._file_page_count(),
         )
-        self.write("page file1")
 
     def _atexit(self):
         # Keep shutdown idempotent for normal exits and fatal-path exits.
@@ -966,20 +948,14 @@ class LCD:
             # Request files
             files = self.callback(self.evt.FILES)
             self.files = files
+            self.current_file_page = 1
             if (files):
-                self.current_file_page = 1
-                i = 0
-                for file in files:
-                    _log(file, level=logging.DEBUG)
-                    safe_file = _lcd_safe_text(file)
-                    # This HMI appears to expose a flat file label space.
-                    # Keep filling labels as file1.t0..file1.tN.
-                    self.write("file1.t%d.txt=\"%s\"" % (i, safe_file))
-                    i += 1
+                self._render_file_slots()
                 self.write("page file1")
             else:
                 self.files = False
-                self.current_file_page = 1
+                # Clear stale labels from a previous listing.
+                self._render_file_slots()
                 self.write("page nosdcard")
 
         elif data[0] == 2: # Abort print
@@ -1491,9 +1467,10 @@ class LCD:
     def _PrintFile(self, data):
         code = data[0]
         if code == 0x01:
+            # Component ids are absolute across HMI file pages (file2 -> t5..t9).
             self.write(
                 "file%d.t%d.pco=65504"
-                % ((self.selected_file // 5) + 1, self.selected_file % 5)
+                % ((self.selected_file // 5) + 1, self.selected_file)
             )
             self.write("printpause.printvalue.txt=\"0\"")
             self.write("printpause.printprocess.val=0")
@@ -1549,15 +1526,11 @@ class LCD:
             return
 
         selected_file = None
-        # Primary mode: HMI reports selected slot index (1..5) on current page.
-        if data[0] >= 1 and data[0] <= 5:
-            page_offset = (self.current_file_page - 1) * 5
-            candidate = page_offset + (data[0] - 1)
-            if candidate < len(self.files):
-                selected_file = candidate
-        # Compatibility mode: some firmware variants may report absolute 1-based index.
-        elif data[0] >= 1 and data[0] <= len(self.files):
-            selected_file = data[0] - 1
+        # The HMI reports an absolute 1-based slot index across all file
+        # pages (page 1 sends 1..5, page 2 sends 6..10, ...).
+        candidate = data[0] - 1
+        if 0 <= candidate < min(len(self.files), MaxFileNumber):
+            selected_file = candidate
 
         if selected_file is not None:
             self.selected_file = selected_file

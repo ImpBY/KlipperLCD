@@ -112,10 +112,10 @@ cd KlipperLCD
 ```
 
 ### 4. Configure environment
-Service/runtime settings are read from:
+Service/runtime settings are read from the same directory as other printer service env files (`klipper.env`, `moonraker.env`):
 
 ```text
-~/.config/KlipperLCD/service.env
+~/printer_data/systemd/KlipperLCD.env
 ```
 
 Create/update this file from template:
@@ -124,17 +124,20 @@ Create/update this file from template:
 make config
 ```
 
+If a config from the previous location (`~/.config/KlipperLCD/service.env`) exists, `make config` moves it to the new path automatically, preserving manual changes.
+
 Key variables:
 - `KLIPPERLCD_LCD_PORT` (for USB-UART typically `/dev/ttyUSB0`)
 - `KLIPPERLCD_LCD_BAUDRATE`
 - `KLIPPERLCD_KLIPPY_SOCK`
 - `KLIPPERLCD_MOONRAKER_URL` (host or IP only, without `http://`)
+- `KLIPPERLCD_MOONRAKER_PORT` (default `80`)
 - `KLIPPERLCD_API_KEY`
 - `KLIPPERLCD_UPDATE_INTERVAL`
 - `KLIPPERLCD_LOG_LEVEL`
 
 Notes:
-- The current implementation connects to Moonraker on port `80` internally, so `KLIPPERLCD_MOONRAKER_URL` should resolve to a host where Moonraker is reachable on port `80`.
+- Moonraker is reached at `http://<KLIPPERLCD_MOONRAKER_URL>:<KLIPPERLCD_MOONRAKER_PORT>`; adjust the port if your Moonraker listens on a non-default one (e.g. `7125`).
 - Keep `KLIPPERLCD_API_KEY` synchronized with your Moonraker API key.
 
 ### 5. Install and enable systemd service
@@ -145,7 +148,7 @@ make install
 This command:
 - creates service venv (`~/<repo-dir-name>-venv`, for this repo: `~/KlipperLCD-venv`),
 - installs package and dependencies,
-- uses service config from `~/.config/<repo-dir-name>/service.env` (for this repo: `~/.config/KlipperLCD/service.env`),
+- uses service config from `~/printer_data/systemd/<repo-dir-name>.env` (for this repo: `~/printer_data/systemd/KlipperLCD.env`),
 - generates `/etc/systemd/system/<repo-dir-name>.service` from `service.template` (for this repo: `/etc/systemd/system/KlipperLCD.service`),
 - enables and starts the service.
 

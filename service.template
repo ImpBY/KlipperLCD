@@ -9,7 +9,7 @@ StartLimitBurst=15
 Type=simple
 User=__SERVICE_USER__
 PermissionsStartOnly=true
-EnvironmentFile=-/home/__SERVICE_USER__/.config/__REPO_NAME__/service.env
+EnvironmentFile=-/home/__SERVICE_USER__/printer_data/systemd/__REPO_NAME__.env
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/usr/bin/mkdir -p /home/__SERVICE_USER__/printer_data/logs
 ExecStartPre=/usr/bin/touch /home/__SERVICE_USER__/printer_data/logs/__REPO_NAME__.log

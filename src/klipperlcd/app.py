@@ -48,6 +48,7 @@ class KlipperLCD:
         self.lcd_baud = _env_int("KLIPPERLCD_LCD_BAUDRATE", 115200)
         self.api_key = os.getenv("KLIPPERLCD_API_KEY", "XXXXXX")
         self.moonraker_url = os.getenv("KLIPPERLCD_MOONRAKER_URL", "127.0.0.1")
+        self.moonraker_port = _env_int("KLIPPERLCD_MOONRAKER_PORT", 80)
         self.klippy_sock = os.getenv(
             "KLIPPERLCD_KLIPPY_SOCK", "/home/pi/printer_data/comms/klippy.sock"
         )
@@ -59,6 +60,7 @@ class KlipperLCD:
         self.printer = PrinterData(
             self.api_key,
             URL=self.moonraker_url,
+            port=self.moonraker_port,
             klippy_sock=self.klippy_sock,
             callback=self.printer_callback,
         )

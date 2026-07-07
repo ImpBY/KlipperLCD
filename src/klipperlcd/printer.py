@@ -357,7 +357,7 @@ class PrinterData:
     SHORT_BUILD_VERSION = "1.00"
     CORP_WEBSITE_E = "https://www.klipper3d.org/"
 
-    def __init__(self, API_Key, URL='127.0.0.1', klippy_sock='/home/pi/printer_data/comms/klippy.sock', callback=None):
+    def __init__(self, API_Key, URL='127.0.0.1', port=80, klippy_sock='/home/pi/printer_data/comms/klippy.sock', callback=None):
         # Runtime comms + state mirrors.
         self.response_callback = callback
         self.klippy_sock      = klippy_sock
@@ -387,7 +387,7 @@ class PrinterData:
         self.max_accel_to_decel     = None
         self.square_corner_velocity = None
         
-        self.op = MoonrakerSocket(URL, 80, API_Key)
+        self.op = MoonrakerSocket(URL, port, API_Key)
         _log("Moonraker address: %s" % self.op.base_address, level=logging.INFO)
 
         self.klippy_start()

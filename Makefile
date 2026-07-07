@@ -21,9 +21,12 @@ SERVICE_NAME ?= $(REPO_NAME).service
 SERVICE_TEMPLATE ?= service.template
 SERVICE_TARGET ?= /etc/systemd/system/$(SERVICE_NAME)
 
-SERVICE_ENV_DIR ?= $(SERVICE_HOME)/.config/$(REPO_NAME)
-SERVICE_ENV_FILE ?= $(SERVICE_ENV_DIR)/service.env
+# Env file lives next to klipper.env/moonraker.env in printer_data/systemd.
+SERVICE_ENV_DIR ?= $(SERVICE_HOME)/printer_data/systemd
+SERVICE_ENV_FILE ?= $(SERVICE_ENV_DIR)/$(REPO_NAME).env
 SERVICE_ENV_TEMPLATE ?= service.env.example
+# Previous location; migrated automatically by `make config` if present.
+LEGACY_SERVICE_ENV_FILE ?= $(SERVICE_HOME)/.config/$(REPO_NAME)/service.env
 
 PRINTER_HOST ?= btt
 PRINTER_USER ?= mcu
@@ -87,6 +90,11 @@ venv:
 
 config:
 	mkdir -p "$(SERVICE_ENV_DIR)"
+	@if [ ! -f "$(SERVICE_ENV_FILE)" ] && [ -f "$(LEGACY_SERVICE_ENV_FILE)" ]; then \
+		mv "$(LEGACY_SERVICE_ENV_FILE)" "$(SERVICE_ENV_FILE)"; \
+		rmdir --ignore-fail-on-non-empty "$(dir $(LEGACY_SERVICE_ENV_FILE))"; \
+		echo "Migrated $(LEGACY_SERVICE_ENV_FILE) -> $(SERVICE_ENV_FILE)"; \
+	fi
 	@if [ ! -f "$(SERVICE_ENV_FILE)" ]; then \
 		cp "$(SERVICE_ENV_TEMPLATE)" "$(SERVICE_ENV_FILE)"; \
 		echo "Created $(SERVICE_ENV_FILE)"; \
