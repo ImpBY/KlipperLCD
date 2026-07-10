@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from klipperlcd.printer import PrinterData
+import pytest
+
+from klipperlcd.printer import PrinterData, interpolate_mesh
 
 
 def _new_printer():
@@ -47,6 +49,116 @@ def test_update_variable_reconnects_only_when_klippy_ready():
     p.getREST = lambda path: {"result": {"state": "ready"}}
     assert p.update_variable() is False
     assert calls == ["exit", "start"]
+
+
+def test_emergency_stop_posts_directly(monkeypatch):
+    p = _new_printer()
+    p.op = SimpleNamespace(
+        base_address="http://printer",
+        s=SimpleNamespace(headers={"X-Api-Key": "k"}),
+    )
+    posts = []
+    monkeypatch.setattr(
+        "klipperlcd.printer.requests.post",
+        lambda url, headers=None, timeout=None: posts.append((url, timeout)),
+    )
+
+    p.emergency_stop()
+
+    assert posts == [("http://printer/printer/emergency_stop", 3)]
+
+
+def test_host_shutdown_uses_machine_endpoint():
+    p = _new_printer()
+    calls = []
+    p.postREST = lambda path, json=None: calls.append((path, json))
+
+    p.host_shutdown()
+
+    assert calls == [("/machine/shutdown", None)]
+
+
+def test_interpolate_mesh_preserves_corners_and_interpolates():
+    result = interpolate_mesh([[0.0, 1.0], [1.0, 2.0]], rows=3, cols=3)
+
+    assert result == [
+        [0.0, 0.5, 1.0],
+        [0.5, 1.0, 1.5],
+        [1.0, 1.5, 2.0],
+    ]
+
+
+def test_interpolate_mesh_same_size_is_identity():
+    matrix = [[float(r * 6 + c) for c in range(6)] for r in range(6)]
+
+    assert interpolate_mesh(matrix, rows=6, cols=6) == matrix
+
+
+def test_get_bed_mesh_returns_probed_matrix_or_none():
+    p = _new_printer()
+    p.getREST = lambda path: {
+        "result": {"status": {"bed_mesh": {"probed_matrix": [[0.1, 0.2], [0.3, 0.4]]}}}
+    }
+    assert p.get_bed_mesh() == [[0.1, 0.2], [0.3, 0.4]]
+
+    p.getREST = lambda path: {
+        "result": {"status": {"bed_mesh": {"probed_matrix": [[]]}}}
+    }
+    assert p.get_bed_mesh() is None
+
+    p.getREST = lambda path: None
+    assert p.get_bed_mesh() is None
+
+
+def test_build_status_query_includes_only_available_objects():
+    p = _new_printer()
+    p.filament_sensor_name = "filament_runout_sensor"
+    p._status_query = None
+    p.getREST = lambda path: {
+        "result": {"objects": ["extruder", "toolhead", "led top_LEDs"]}
+    }
+
+    query = p._build_status_query()
+
+    assert "led%20top_LEDs" in query
+    assert "filament_switch_sensor" not in query
+    # Cached: later calls skip the objects/list round-trip.
+    p.getREST = lambda path: (_ for _ in ()).throw(AssertionError("not cached"))
+    assert p._build_status_query() == query
+
+
+def test_build_status_query_falls_back_when_object_list_unavailable():
+    p = _new_printer()
+    p.filament_sensor_name = "filament_runout_sensor"
+    p._status_query = None
+    p.getREST = lambda path: None
+
+    query = p._build_status_query()
+
+    assert query.endswith("extruder&heater_bed&gcode_move&fan&print_stats&virtual_sdcard&toolhead")
+    assert "led%20top_LEDs" not in query
+    # Not cached on failure: retried next cycle.
+    assert p._status_query is None
+
+
+def test_update_optional_states_mirrors_led_and_sensor():
+    p = _new_printer()
+    p.filament_sensor_name = "filament_runout_sensor"
+    p.led_brightness = None
+    p.filament_sensor_enabled_live = None
+
+    p._update_optional_states({
+        "led top_LEDs": {"color_data": [[0.0, 0.0, 0.0, 0.05]]},
+        "filament_switch_sensor filament_runout_sensor": {"enabled": False},
+    })
+
+    assert p.led_brightness == pytest.approx(5.0)
+    assert p.filament_sensor_enabled_live is False
+
+    # Objects absent from the payload leave previous values untouched.
+    p._update_optional_states({})
+    assert p.led_brightness == pytest.approx(5.0)
+    assert p.filament_sensor_enabled_live is False
 
 
 def test_get_filament_sensor_enabled_parses_state():
@@ -122,10 +234,11 @@ def test_set_print_speed_and_flow_emit_expected_gcode():
 
     p.set_print_speed(120)
     p.set_flow(95)
+    p.set_flow(101.5)
 
     assert p.print_speed == 120
-    assert p.flow_percentage == 95
-    assert sent == ["M220 S120", "M221 S95"]
+    assert p.flow_percentage == 101.5
+    assert sent == ["M220 S120", "M221 S95", "M221 S101.5"]
 
 
 def test_set_led_translates_percent_to_brightness_gcode():

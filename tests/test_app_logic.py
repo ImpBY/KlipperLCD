@@ -144,7 +144,7 @@ def test_lcd_callback_probe_complete_sends_expected_gcode():
     ]
 
 
-def test_lcd_callback_bed_mesh_runs_bed_leveling_macro():
+def test_lcd_callback_bed_mesh_runs_scan_only_macro():
     app = _new_app()
     evt = LCDEvents()
     sent = []
@@ -153,7 +153,63 @@ def test_lcd_callback_bed_mesh_runs_bed_leveling_macro():
 
     app.lcd_callback(evt.BED_MESH)
 
-    assert sent == ["BED_LEVELING"]
+    assert sent == ["_LCD_BED_LEVELING"]
+    assert app.leveling_started is not None
+
+
+def test_lcd_callback_leveling_save_runs_save_macro():
+    app = _new_app()
+    evt = LCDEvents()
+    sent = []
+    app.lcd = SimpleNamespace(evt=evt)
+    app.printer = SimpleNamespace(sendGCode=lambda cmd: sent.append(cmd))
+
+    app.lcd_callback(evt.LEVELING_SAVE)
+
+    assert sent == ["_LCD_LEVELING_SAVE"]
+
+
+def test_printer_callback_leveling_marker_triggers_result(monkeypatch):
+    app = _new_app()
+    app.leveling_started = 12345
+    app.lcd = SimpleNamespace(
+        format_console_data=lambda data, data_type: None,
+        write_console=lambda msg: None,
+    )
+    _DummyThread.started = 0
+    monkeypatch.setattr("klipperlcd.app.Thread", _DummyThread)
+
+    app.printer_callback("// LCD:LEVELING_DONE", "response")
+
+    assert app.leveling_started is None
+    assert _DummyThread.started == 1
+
+    # Unrelated responses do not trigger the worker.
+    app.printer_callback("ok", "response")
+    assert _DummyThread.started == 1
+
+
+def test_show_leveling_result_renders_interpolated_mesh():
+    app = _new_app()
+    shown = []
+    app.lcd = SimpleNamespace(
+        show_leveling_result=lambda matrix: shown.append(matrix),
+        leveling_abort=lambda: shown.append("abort"),
+    )
+    app.printer = SimpleNamespace(get_bed_mesh=lambda: [[0.0, 1.0], [1.0, 2.0]])
+
+    app._show_leveling_result()
+
+    assert len(shown) == 1
+    matrix = shown[0]
+    assert len(matrix) == 6 and len(matrix[0]) == 6
+    assert matrix[0][0] == 0.0
+    assert matrix[5][5] == 2.0
+
+    # No mesh available: the UI is unblocked instead.
+    app.printer = SimpleNamespace(get_bed_mesh=lambda: None)
+    app._show_leveling_result()
+    assert shown[-1] == "abort"
 
 
 def test_lcd_callback_filament_sensor_explicit_state():
@@ -186,10 +242,12 @@ def test_lcd_callback_filament_sensor_toggle_uses_klipper_state():
     app.filament_sensor = "filament_runout_sensor"
     app.filament_sensor_enabled = True
 
-    app.lcd_callback(evt.FILAMENT_SENSOR, None)
+    result = app.lcd_callback(evt.FILAMENT_SENSOR, None)
 
     assert sent == ["SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=0"]
     assert app.filament_sensor_enabled is False
+    # The new state is returned so the LCD can update its indicator.
+    assert result is False
 
 
 def test_lcd_callback_filament_sensor_toggle_falls_back_to_local_state():
@@ -208,6 +266,48 @@ def test_lcd_callback_filament_sensor_toggle_falls_back_to_local_state():
 
     assert sent == ["SET_FILAMENT_SENSOR SENSOR=filament_runout_sensor ENABLE=1"]
     assert app.filament_sensor_enabled is True
+
+
+def test_lcd_callback_emergency_stop_and_power_off():
+    app = _new_app()
+    evt = LCDEvents()
+    calls = []
+    app.lcd = SimpleNamespace(evt=evt)
+    app.printer = SimpleNamespace(
+        emergency_stop=lambda: calls.append("emergency_stop"),
+        host_shutdown=lambda: calls.append("host_shutdown"),
+    )
+
+    app.lcd_callback(evt.EMERGENCY_STOP)
+    app.lcd_callback(evt.POWER_OFF)
+
+    assert calls == ["emergency_stop", "host_shutdown"]
+
+
+def test_lcd_callback_console_and_macros_refresh():
+    app = _new_app()
+    evt = LCDEvents()
+    written = []
+    app.lcd = SimpleNamespace(
+        evt=evt,
+        write_gcode_store=lambda store: written.append(("store", store)),
+        write_macros=lambda macros: written.append(("macros", macros)),
+    )
+    app.printer = SimpleNamespace(
+        get_gcode_store=lambda: None,  # Moonraker unavailable -> guarded
+        get_macros=lambda: ["BED_LEVELING"],
+        sendGCode=lambda cmd: written.append(("gcode", cmd)),
+    )
+
+    app.lcd_callback(evt.CONSOLE_OPEN)
+    app.lcd_callback(evt.MACROS_OPEN)
+    app.lcd_callback(evt.KLIPPER_RESTART)
+
+    assert written == [
+        ("store", []),
+        ("macros", ["BED_LEVELING"]),
+        ("gcode", "FIRMWARE_RESTART"),
+    ]
 
 
 def test_lcd_callback_accel_to_decel_converts_percent_to_ratio():

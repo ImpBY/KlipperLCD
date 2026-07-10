@@ -1,13 +1,14 @@
 import base64
 import logging
 import os
+import socket
 import time
 from pathlib import Path
 from threading import Lock, Thread
 
 from .lcd import LCD, _printerData
 from .logging_setup import setup_logging
-from .printer import PrinterData
+from .printer import PrinterData, interpolate_mesh
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,24 @@ def _log(*args, level=logging.INFO):
 
 
 THUMBNAIL_MAX_B64_LEN = 8 * 1024 * 1024
+
+# Console marker emitted by the _LCD_BED_LEVELING config macro when the scan
+# is done, and the safety timeout in case the macro aborts without it.
+LEVELING_DONE_MARKER = "LCD:LEVELING_DONE"
+LEVELING_TIMEOUT_S = 15 * 60
+
+
+def _host_ip():
+    """Best-effort LAN IP of the host (no traffic is actually sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
 
 
 def _env_int(name, default):
@@ -68,10 +87,12 @@ class KlipperLCD:
             port=self.moonraker_port,
             klippy_sock=self.klippy_sock,
             callback=self.printer_callback,
+            filament_sensor_name=self.filament_sensor,
         )
 
         self.running = False
         self.wait_probe = False
+        self.leveling_started = None
         self.thumbnail_inprogress = False
         self._update_thread = None
         self._event_names = self._build_event_names()
@@ -96,6 +117,10 @@ class KlipperLCD:
         _log(self.printer.SHORT_BUILD_VERSION, level=logging.DEBUG)
         self.lcd.write('information.size.txt="%s"' % self.printer.MACHINE_SIZE)
         self.lcd.write('information.sversion.txt="%s"' % self.printer.SHORT_BUILD_VERSION)
+        # Klipper UI firmware only; a harmless unknown-component error on stock.
+        ip = _host_ip()
+        if ip:
+            self.lcd.write('information.ip.txt="%s"' % ip)
         self.lcd.write("page main")
 
     def start(self):
@@ -150,6 +175,12 @@ class KlipperLCD:
         data.feedrate = p.print_speed
         data.flowrate = p.flow_percentage
         data.fan = p.thermalManager["fan_speed"][0]
+        data.led = p.led_brightness
+        data.filament_sensor = (
+            p.filament_sensor_enabled_live
+            if p.filament_sensor_enabled_live is not None
+            else self.filament_sensor_enabled
+        )
         data.x_pos = p.current_position.x
         data.y_pos = p.current_position.y
         data.z_pos = p.current_position.z
@@ -176,6 +207,15 @@ class KlipperLCD:
                         _log("IsHomed")
                         self.lcd.probe_mode_start()
 
+                if (
+                    self.leveling_started
+                    and time.time() - self.leveling_started > LEVELING_TIMEOUT_S
+                ):
+                    # Macro aborted without the completion marker; unblock UI.
+                    _log("Leveling completion marker timed out", level=logging.WARNING)
+                    self.leveling_started = None
+                    self.lcd.leveling_abort()
+
                 self.printer.update_variable()
                 data = self._build_lcd_snapshot()
                 logger.debug(
@@ -194,9 +234,26 @@ class KlipperLCD:
 
     def printer_callback(self, data, data_type):
         logger.debug("APP printer callback: type=%s payload=%r", data_type, data)
+        if data_type == "response" and LEVELING_DONE_MARKER in str(data):
+            self._on_leveling_done()
         msg = self.lcd.format_console_data(data, data_type)
         if msg:
             self.lcd.write_console(msg)
+
+    def _on_leveling_done(self):
+        # Called from the klippy socket thread; the mesh fetch is a blocking
+        # REST call, so hand it off to a worker thread.
+        self.leveling_started = None
+        Thread(target=self._show_leveling_result, daemon=True).start()
+
+    def _show_leveling_result(self):
+        matrix = self.printer.get_bed_mesh()
+        if matrix:
+            self._event_tx_log("lcd.show_leveling_result")
+            self.lcd.show_leveling_result(interpolate_mesh(matrix))
+        else:
+            _log("Leveling done but bed mesh is unavailable", level=logging.WARNING)
+            self.lcd.leveling_abort()
 
     def _start_thumbnail_worker(self):
         with self._thumbnail_lock:
@@ -382,10 +439,16 @@ class KlipperLCD:
             self._event_tx_log("printer.sendGCode", "SAVE_CONFIG")
             self.printer.sendGCode("SAVE_CONFIG")
         elif evt == self.lcd.evt.BED_MESH:
-            # Full leveling sequence: tap + mesh into profile "default",
-            # then SAVE_CONFIG (restarts Klipper). Handled by the config macro.
-            self._event_tx_log("printer.sendGCode", "BED_LEVELING")
-            self.printer.sendGCode("BED_LEVELING")
+            # Scan-only leveling (tap + mesh into profile "default", no
+            # SAVE_CONFIG); the config macro emits LEVELING_DONE_MARKER on
+            # completion, which triggers the mesh display on the LCD.
+            self.leveling_started = time.time()
+            self._event_tx_log("printer.sendGCode", "_LCD_BED_LEVELING")
+            self.printer.sendGCode("_LCD_BED_LEVELING")
+        elif evt == self.lcd.evt.LEVELING_SAVE:
+            # Reset toggles to defaults and persist the mesh (restarts Klipper).
+            self._event_tx_log("printer.sendGCode", "_LCD_LEVELING_SAVE")
+            self.printer.sendGCode("_LCD_LEVELING_SAVE")
         elif evt == self.lcd.evt.FILAMENT_SENSOR:
             if data is None:
                 # Stateless HMI button: toggle relative to the actual Klipper
@@ -404,6 +467,8 @@ class KlipperLCD:
             )
             self._event_tx_log("printer.sendGCode", gcode)
             self.printer.sendGCode(gcode)
+            # The LCD uses the returned state to update its toggle indicator.
+            return target
         elif evt == self.lcd.evt.LIGHT:
             self._event_tx_log("printer.set_led", data)
             self.printer.set_led(data)
@@ -443,6 +508,23 @@ class KlipperLCD:
         elif evt == self.lcd.evt.CONSOLE:
             self._event_tx_log("printer.sendGCode", data)
             self.printer.sendGCode(data)
+        elif evt == self.lcd.evt.EMERGENCY_STOP:
+            self._event_tx_log("printer.emergency_stop")
+            self.printer.emergency_stop()
+        elif evt == self.lcd.evt.POWER_OFF:
+            # Current scope: CB1 host shutdown; mains stays on (smart plug
+            # power-off via HomeAssistant is a planned follow-up).
+            self._event_tx_log("printer.host_shutdown")
+            self.printer.host_shutdown()
+        elif evt == self.lcd.evt.CONSOLE_OPEN:
+            self._event_tx_log("lcd.write_gcode_store")
+            self.lcd.write_gcode_store(self.printer.get_gcode_store() or [])
+        elif evt == self.lcd.evt.MACROS_OPEN:
+            self._event_tx_log("lcd.write_macros")
+            self.lcd.write_macros(self.printer.get_macros() or [])
+        elif evt == self.lcd.evt.KLIPPER_RESTART:
+            self._event_tx_log("printer.sendGCode", "FIRMWARE_RESTART")
+            self.printer.sendGCode("FIRMWARE_RESTART")
         else:
             _log("lcd_callback event not recognised %d" % evt, level=logging.WARNING)
 

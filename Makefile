@@ -46,7 +46,11 @@ SYNC_EXCLUDES := \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-container clean venv install uninstall upgrade config sync
+PYPROJECT ?= pyproject.toml
+# Version part bumped by `make bump`: patch, minor or major.
+PART ?= patch
+
+.PHONY: help test test-container clean venv install uninstall upgrade config sync bump
 
 help:
 	@echo "Available targets:"
@@ -60,6 +64,7 @@ help:
 	@echo "  uninstall  Remove systemd unit and service venv"
 	@echo "  upgrade    Reinstall and restart service"
 	@echo "  sync       Rsync repository to printer host"
+	@echo "  bump       Bump version in $(PYPROJECT) (PART=patch|minor|major, default patch)"
 
 # ----- Development / testing (repo-local only) -----
 
@@ -78,6 +83,19 @@ clean:
 	find . -type d -name "build" -prune -exec rm -rf {} +
 	find . -type d -name "dist" -prune -exec rm -rf {} +
 	rm -rf $(DEV_VENV)
+
+bump:
+	@current=$$(sed -n 's/^version = "\(.*\)"$$/\1/p' $(PYPROJECT)); \
+	[ -n "$$current" ] || { echo "version not found in $(PYPROJECT)"; exit 1; }; \
+	major=$${current%%.*}; rest=$${current#*.}; minor=$${rest%%.*}; patch=$${rest#*.}; \
+	case "$(PART)" in \
+		major) new="$$((major+1)).0.0" ;; \
+		minor) new="$$major.$$((minor+1)).0" ;; \
+		patch) new="$$major.$$minor.$$((patch+1))" ;; \
+		*) echo "PART must be patch, minor or major (got '$(PART)')"; exit 1 ;; \
+	esac; \
+	sed -i "s/^version = \"$$current\"$$/version = \"$$new\"/" $(PYPROJECT); \
+	echo "Version: $$current -> $$new"
 
 venv:
 	$(PYTHON) -m venv $(DEV_VENV)

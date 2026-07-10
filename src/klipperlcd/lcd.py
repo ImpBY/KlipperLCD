@@ -16,6 +16,7 @@ from time import sleep
 
 from PIL import Image
 
+from . import hmi_trace
 from . import lib_col_pic
 import serial
 
@@ -72,10 +73,19 @@ PETG  = 2
 TPU   = 3
 PROBE = 4
 
+# Periodic HMI polls excluded from the interaction trace (addr, code).
+TRACE_QUIET_INPUTS = {(0x1044, 0x0A)}
+
 # Model-cooling fan speed applied when toggled on from the UI (percent).
 FAN_TOGGLE_ON_PERCENT = 40
 # Chamber light brightness applied when toggled on from the UI (percent).
 LIGHT_ON_PERCENT = 5
+# Sprite pair for the settings-page toggle indicators (set.fanstatue,
+# set.filamentdec). Direction (which pic is "on") verified on device.
+SET_TOGGLE_PIC_ON = 77
+SET_TOGGLE_PIC_OFF = 76
+# Mesh grid size of the HMI leveldata_36 page (components x0..x35).
+LEVELING_GRID_POINTS = 36
 
 
 class _printerData:
@@ -94,6 +104,8 @@ class _printerData:
     feedrate        = None
     flowrate        = 0
     fan             = None
+    led             = None
+    filament_sensor = None
     x_pos           = None
     y_pos           = None
     z_pos           = None
@@ -138,6 +150,12 @@ class LCDEvents:
     THUMBNAIL      = 28
     CONSOLE        = 29
     FILAMENT_SENSOR = 30
+    LEVELING_SAVE  = 31
+    EMERGENCY_STOP = 32
+    POWER_OFF      = 33
+    CONSOLE_OPEN   = 34
+    MACROS_OPEN    = 35
+    KLIPPER_RESTART = 36
 
 
 class LCD:
@@ -222,7 +240,6 @@ class LCD:
         self.feedrate_e = 300
         self.z_offset_unit = None
         self.light = False
-        self.power_loss_recovery_enabled = True
         self.filament_sensor_enabled = True
         # Adjusting speed
         self.speed_adjusting = None
@@ -231,6 +248,10 @@ class LCD:
         self.accel_unit = 100
         # Probe /Level mode
         self.probe_mode = False
+        self.leveling_active = False
+        # E-axis pulse screen repurposed as a flow trim (0.1% units).
+        self.eaxis_trim = 0
+        self.eaxis_step = 1
         # Thumbnail
         self.is_thumbnail_written = False
         self.askprint = False
@@ -258,6 +279,9 @@ class LCD:
             0x1002: {
                 0x01: "main.print_open_files",
                 0x02: "main.abort_print",
+                0x03: "main.console_open",
+                0x04: "main.emergency_stop",
+                0x05: "main.power_off_confirm",
             },
             0x1004: {
                 0x01: "adjustment.filament_tab",
@@ -327,12 +351,15 @@ class LCD:
                 0x08: "settings.filament_sensor_toggle",
                 0x09: "settings.preheat_page",
                 0x0A: "settings.filament_page",
-                0x0B: "settings.main_settings_page",
+                0x0B: "settings.page_open",
                 0x0C: "settings.read_level_warning_page",
                 0x0D: "settings.advanced_page",
+                0x0E: "settings.klipper_restart",
+                0x0F: "settings.macros_open",
             },
             0x1040: {
                 0x01: "settings.back_from_probe",
+                0x05: "settings.back",
             },
             0x1044: {
                 0x02: "zoffset.increase",
@@ -347,6 +374,7 @@ class LCD:
                 0x0B: "zoffset.temp_refresh",
                 0x0C: "zoffset.noop",
                 0x16: "zoffset.resume_print_page",
+                0x20: "zoffset.page_open",
             },
             0x1046: {
                 0x04: "axis.home_all",
@@ -372,12 +400,26 @@ class LCD:
                 0x02: "filament_sensor.off",
                 0x03: "filament_sensor.on",
             },
+            # "Resume Printing" on the advanced-settings screen; this HMI
+            # revision always sends 0x03 (stateless button, no function yet).
+            0x105F: {
+                0x00: "multiset.resume_print_off",
+                0x01: "multiset.resume_print_on",
+                0x02: "multiset.resume_print_off",
+                0x03: "multiset.resume_print_button",
+            },
             0x1056: {
                 0x01: "filament.load",
                 0x02: "filament.unload",
                 0x05: "filament.temp_warning_confirm",
                 0x06: "filament.temp_warning_cancel",
                 0x0A: "filament.back",
+                0x0B: "motor.eaxis_open",
+                0x0C: "motor.eaxis_minus",
+                0x0D: "motor.eaxis_plus",
+                0x0E: "motor.eaxis_step_1",
+                0x0F: "motor.eaxis_step_5",
+                0x10: "motor.eaxis_step_10",
             },
             0x2198: {
                 0x01: "file.start_selected",
@@ -409,8 +451,9 @@ class LCD:
                 0x01: "preset.bed_plus",
                 0x02: "preset.bed_minus",
             },
+            # Sent by the main page codesload event on every page entry.
             0x2202: {
-                0x0F: "hardware_test.poll",
+                0x0F: "main.page_open",
             },
             0x4201: {
                 0x01: "console.back",
@@ -453,6 +496,11 @@ class LCD:
             evt,
             data,
         )
+        if hmi_trace.current_label():
+            hmi_trace.trace(
+                "EVENT",
+                "%s(%s) payload=%r" % (self._event_name(evt), evt, data),
+            )
         if self._callback is None:
             logger.debug("UI route dropped: callback is not configured")
             return None
@@ -505,6 +553,7 @@ class LCD:
         self.is_thumbnail_written = False
         self.waiting = None
         self.error_from_lcd = False
+        self.leveling_active = False
 
         self.running = True
         while self.running and not self.ser.is_open:
@@ -572,6 +621,10 @@ class LCD:
         framed = bytearray(dat)
         if eol:
             framed.extend(bytearray([0xFF, 0xFF, 0xFF]))
+        # Trace only writes issued while handling an HMI input; periodic
+        # status updates from the app thread would flood the trace file.
+        if hmi_trace.current_label():
+            hmi_trace.trace("TX", repr(decoded))
         logger.debug(
             "LCD TX: decoded=%r eol=%s lf=%s raw=%s",
             decoded,
@@ -763,6 +816,57 @@ class LCD:
         if data != self.printer:
             self.printer = data
 
+    def _write_toggle_pic(self, component, on):
+        self.write(
+            "%s.pic=%d"
+            % (component, SET_TOGGLE_PIC_ON if on else SET_TOGGLE_PIC_OFF)
+        )
+
+    def _sync_settings_indicators(self):
+        """Reflect actual printer state on the settings-page toggles."""
+        light_on = (self.printer.led or 0) > 0
+        self.light = light_on
+        # The HMI's own light-button logic keys off this global variable.
+        self.write("status_led2=%d" % (1 if light_on else 0))
+        self._write_toggle_pic("set.fanstatue", (self.printer.fan or 0) > 0)
+        sensor = self.printer.filament_sensor
+        if sensor is None:
+            sensor = self.filament_sensor_enabled
+        else:
+            self.filament_sensor_enabled = bool(sensor)
+        self._write_toggle_pic("set.filamentdec", bool(sensor))
+
+    def _sync_zoffset_indicators(self):
+        """Reflect actual printer state on the adjustzoffset-page toggles."""
+        light_on = (self.printer.led or 0) > 0
+        self.light = light_on
+        self.write("status_led2=%d" % (1 if light_on else 0))
+        self._write_toggle_pic("adjustzoffset.led2", light_on)
+        sensor = self.printer.filament_sensor
+        if sensor is None:
+            sensor = self.filament_sensor_enabled
+        self._write_toggle_pic("adjustzoffset.filamentdec", bool(sensor))
+
+    def show_leveling_result(self, matrix):
+        """Render a 6x6 mesh (mm) on the leveldata_36 grid and open the page."""
+        values = [value for row in matrix for value in row]
+        if len(values) != LEVELING_GRID_POINTS:
+            _log(
+                "show_leveling_result: expected %d points, got %d"
+                % (LEVELING_GRID_POINTS, len(values)),
+                level=logging.WARNING,
+            )
+            self.leveling_abort()
+            return
+        for i, value in enumerate(values):
+            self.write("leveldata_36.x%d.val=%d" % (i, int(round(value * 100))))
+        self.write("page leveldata_36")
+
+    def leveling_abort(self):
+        """Unblock the UI when leveling ends without a usable mesh."""
+        self.leveling_active = False
+        self.write("page main")
+
     def probe_mode_start(self):
         self.probe_mode = True
         self.z_offset_unit = 1
@@ -860,6 +964,11 @@ class LCD:
             if len(dat) >= 2:
                 addr = (dat[0] << 8) | dat[1]
                 handler = self.addr_func_map.get(addr)
+                hmi_trace.trace(
+                    "RX?",
+                    "writevar addr=0x%04X raw=%s"
+                    % (addr, binascii.hexlify(dat).decode()),
+                )
                 logger.warning(
                     "UI writevar: addr=0x%04X handler=%s raw=%s",
                     addr,
@@ -902,6 +1011,11 @@ class LCD:
             )
             self._handle_readvar(addr, data)
         else:
+            hmi_trace.trace(
+                "RX?",
+                "cmd=0x%02X not recognised raw=%s"
+                % (cmd, binascii.hexlify(dat).decode()),
+            )
             _log("Command not reqognised: %d" % cmd, level=logging.WARNING)
             _log(binascii.hexlify(dat), level=logging.DEBUG)
 
@@ -925,7 +1039,8 @@ class LCD:
                 "element": element,
                 "handler": handler.__name__,
             }
-            if not (handler.__name__ == "_BedLevelFun" and code == 0x0A):
+            quiet = (addr, code) in TRACE_QUIET_INPUTS
+            if not quiet:
                 logger.debug(
                     "UI input: addr=0x%04X code=%s element=%s handler=%s len=%d data=%r",
                     addr,
@@ -935,11 +1050,34 @@ class LCD:
                     len(data),
                     data,
                 )
+            trace_label = None
+            if not quiet:
+                trace_label = (
+                    element
+                    if element != "unknown"
+                    else "unknown@0x%04X" % addr
+                )
+                hmi_trace.trace(
+                    "RX",
+                    "addr=0x%04X code=%s element=%s handler=%s data=%r"
+                    % (
+                        addr,
+                        ("0x%02X" % code if isinstance(code, int) else "none"),
+                        element,
+                        handler.__name__,
+                        data,
+                    ),
+                )
             try:
-                handler(data)
+                with hmi_trace.interaction(trace_label):
+                    handler(data)
             finally:
                 self._last_ui_context = None
         else:
+            hmi_trace.trace(
+                "RX?",
+                "addr=0x%04X not mapped data=%r" % (addr, data),
+            )
             _log(
                 "_handle_readvar: addr %x not recognised data=%r" % (addr, data),
                 level=logging.WARNING,
@@ -973,6 +1111,12 @@ class LCD:
 
         elif data[0] == 2: # Abort print
             self.callback(self.evt.PRINT_STOP)
+        elif data[0] == 3: # Console button (page switch is local on the HMI)
+            self.callback(self.evt.CONSOLE_OPEN)
+        elif data[0] == 4: # Emergency stop: instant, no confirmation
+            self.callback(self.evt.EMERGENCY_STOP)
+        elif data[0] == 5: # Power off confirmed on the poweroff dialog
+            self.callback(self.evt.POWER_OFF)
         else:
             _log("_MainPage: %d not supported" % data[0])
 
@@ -1263,10 +1407,12 @@ class LCD:
 
     def _SettingScreen(self, data):
         if data[0] == 0x01:
-            # Full bed leveling is delegated to the host-side flow (Klipper
-            # macro): tap + mesh into profile "default" + SAVE_CONFIG restart.
+            # Scan-only leveling (config macro, no SAVE_CONFIG). Stay on the
+            # autohome page until the completion marker arrives: the user
+            # must not leave to the main screen mid-scan.
             self.callback(self.evt.BED_MESH)
-            self.write("page main")
+            self.leveling_active = True
+            self.write("page autohome")
         elif data[0] == 0x06: # Motor release
             self.callback(self.evt.MOTOR_OFF)
         elif data[0] == 0x07: # Model cooling fan toggle
@@ -1276,9 +1422,13 @@ class LCD:
             else:
                 self.printer.fan = FAN_TOGGLE_ON_PERCENT
                 self.callback(self.evt.FAN, FAN_TOGGLE_ON_PERCENT)
+            self._write_toggle_pic("set.fanstatue", (self.printer.fan or 0) > 0)
         elif data[0] == 0x08: # Filament runout sensor toggle (stateless button)
-            self.callback(self.evt.FILAMENT_SENSOR, None)
-        elif data[0] == 0x09: # 
+            target = self.callback(self.evt.FILAMENT_SENSOR, None)
+            if target is not None:
+                self.filament_sensor_enabled = bool(target)
+                self._write_toggle_pic("set.filamentdec", bool(target))
+        elif data[0] == 0x09: #
             self.write("page pretemp")
             self.write("pretemp.nozzle.txt=\"%d\"" % self.printer.hotend_target)
             self.write("pretemp.bed.txt=\"%d\"" % self.printer.bed_target)
@@ -1287,14 +1437,19 @@ class LCD:
             self.write("prefilament.filamentlength.txt=\"%d\"" % self.load_len)
             self.write("prefilament.filamentspeed.txt=\"%d\"" % self.feedrate_e)
         elif data[0] == 0x0b:
-            self.write("page set")
+            # Page-enter notification from the set page (Klipper UI firmware
+            # sends it from codesload; the page switch itself is local).
+            self._sync_settings_indicators()
         elif data[0] == 0x0c:
             self.write("page warn_rdlevel")
         elif data[0] == 0x0d: # Advanced Settings
-            plr_value = 1 if self.power_loss_recovery_enabled else 0
-            self.write("multiset.plrbutton.val=%d" % plr_value)
+            # The Resume Printing toggle was removed (no power-loss recovery in
+            # Klipper); nothing to pre-set on the advanced page anymore.
             self.write("page multiset")
-
+        elif data[0] == 0x0e: # Restart Klipper button (Klipper UI firmware)
+            self.callback(self.evt.KLIPPER_RESTART)
+        elif data[0] == 0x0f: # Macros page open (page switch is local)
+            self.callback(self.evt.MACROS_OPEN)
         else:
             _log("_SettingScreen: Not recognised %d" % data[0])
 
@@ -1302,9 +1457,19 @@ class LCD:
 
     def _SettingBack(self, data):
         if data[0] == 0x01:
-            if self.probe_mode:
+            if self.leveling_active:
+                # Save button on the leveling result screen: reset toggles to
+                # defaults and persist the mesh (config macro, restarts Klipper).
+                self.leveling_active = False
+                self.callback(self.evt.LEVELING_SAVE)
+                self.write("page main")
+            elif self.probe_mode:
                 self.probe_mode = False
                 self.callback(self.evt.PROBE_BACK)
+        elif data[0] == 0x05:
+            # Back from tempsetvalue/prefilament/motorsetting screens;
+            # navigation is handled by the HMI itself.
+            pass
         else:
             _log("_SettingBack: Not recognised %d" % data[0])
 
@@ -1358,6 +1523,9 @@ class LCD:
             pass # Screen requesting nozzle and bed temp
         elif data[0] == 0x0c:
             pass
+        elif data[0] == 0x20:
+            # Page-enter notification from adjustzoffset (Klipper UI firmware).
+            self._sync_zoffset_indicators()
         elif data[0] == 0x16:
             self.write("main.va0.val=1")
             self.write("printpause.t0.txt=\"%s\"" % self.printer.file_name)
@@ -1431,7 +1599,22 @@ class LCD:
 
         elif data[0] == 0x0a: # Back
             self.write("page main")
-        else:   
+        # "E-axis pulse" screen (motorsetting -> motorsetvalue), repurposed
+        # as a flow trim: 1 unit = 0.1% flow (trim 15 -> 101.5%). The HMI
+        # does not update the displayed number itself; the host renders it.
+        elif data[0] == 0x0b: # E-axis pulse screen open
+            self.eaxis_trim = int(round(((self.printer.flowrate or 100) - 100) * 10))
+            self.write("motorsetvalue.eaxis.val=%d" % self.eaxis_trim)
+        elif data[0] in (0x0c, 0x0d): # E-axis pulse - / +
+            delta = self.eaxis_step if data[0] == 0x0d else -self.eaxis_step
+            self.eaxis_trim += delta
+            self.write("motorsetvalue.eaxis.val=%d" % self.eaxis_trim)
+            self.callback(self.evt.FLOW, 100 + self.eaxis_trim / 10.0)
+        elif data[0] in (0x0e, 0x0f, 0x10): # Flow-trim step select 1/5/10
+            steps = {0x0e: (1, 62), 0x0f: (5, 63), 0x10: (10, 64)}
+            self.eaxis_step, step_pic = steps[data[0]]
+            self.write("motorsetvalue.p1.pic=%d" % step_pic)
+        else:
             _log("_FilamentLoad: Not recognised %d" % data[0])
 
     def _SelectLanguage(self, data):    
@@ -1452,19 +1635,10 @@ class LCD:
         self.callback(self.evt.FILAMENT_SENSOR, enabled)
 
     def _PowerContinuePrint(self, data):
-        code = data[0]
-        if code in (0x00, 0x02):
-            self.power_loss_recovery_enabled = False
-        elif code in (0x01, 0x03):
-            self.power_loss_recovery_enabled = True
-        else:
-            _log("_PowerContinuePrint: Not recognised %d" % code)
-            return
-
-        self.write(
-            "multiset.plrbutton.val=%d"
-            % (1 if self.power_loss_recovery_enabled else 0)
-        )
+        # Legacy "Resume Printing" switch (addr 0x105F). The toggle is removed
+        # from the Klipper UI firmware (no power-loss recovery in Klipper); the
+        # handler is kept as a no-op for older firmware that still sends it.
+        logger.debug("Ignoring legacy power-loss recovery input: %r", data)
 
     def _toggle_light(self):
         if self.light:

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-10
+
+### Changed
+- Leveling flow reworked (requires `_LCD_BED_LEVELING`/`_LCD_LEVELING_SAVE` macros in the Klipper config): the Leveling button now runs a scan-only `_LCD_BED_LEVELING` (no `SAVE_CONFIG`), keeps the panel on the autohome page during the scan, then shows the probed mesh interpolated to the 6x6 `leveldata_36` grid. Save + Klipper restart happen only when the save element on the result screen is pressed (`_LCD_LEVELING_SAVE`, which also resets fan/filament-sensor/light to defaults first). A 15-minute fallback timeout unblocks the UI if the macro aborts without the completion marker.
+- `set_flow` accepts fractional percent (`M221 S101.5`).
+- Settings-page open (`0x103E/0x0B`) no longer re-sends `page set`: on the target firmware the notification comes from the page's own load event, so echoing the page switch would loop the page. Element renames: `0x2202/0x0F` is `main.page_open` (sent on every main-page entry, not a hardware test).
+
+### Added
+- Klipper-oriented HMI firmware rework spec (`LCD/klipper_ui_spec.md`) and service support for all its new inputs (backwards-compatible — stock firmware never sends them): main-screen E-STOP (`/printer/emergency_stop`, sent directly so it never waits behind a long gcode POST), power-off confirm (`/machine/shutdown`), console button (refreshes gcode history), settings-page Restart Klipper (`FIRMWARE_RESTART`) and Macros buttons, adjustzoffset page-enter indicator sync, flow-trim step selector 1/5/10. Host IP is written to `information.ip.txt` at startup.
+- Settings-page toggle indicators now reflect the real printer state: on opening the settings screen the service syncs `status_led2` (light), `set.fanstatue.pic` (fan) and `set.filamentdec.pic` (filament sensor) from Klipper state (`led top_LEDs` and the filament sensor are mirrored via the periodic status query when present); fan/filament toggles update their indicator on each press.
+- "E-axis pulse" screen (`motorsetting` -> `motorsetvalue`) repurposed as a flow trim: 1 unit = 0.1% flow (value 15 -> 101.5%), the service renders the value into `motorsetvalue.eaxis.val` and sends fractional `M221`.
+- HMI element names for previously unknown inputs: generic back (`0x1040/0x05`), E-axis pulse buttons (`0x1056/0x0B..0x0D`), Resume Printing button (`0x105F`, stateless on this HMI revision, documented — no function attached).
+- `make bump` target: bumps the version in `pyproject.toml` (`PART=patch|minor|major`, default `patch`).
+- HMI interaction trace mode (`KLIPPERLCD_HMI_TRACE=1`, optional `KLIPPERLCD_HMI_TRACE_FILE`): every touch input from the LCD (`RX`, with the mapped element label; `RX?` for unknown/writevar frames) and every command issued while handling it — LCD writes (`TX`), dispatched app events (`EVENT`), Moonraker REST calls (`REST`), Klippy socket lines (`KLIPPY`) — is appended to a standalone trace file (default `~/printer_data/logs/KlipperLCD_hmi_trace.log`), independent of `KLIPPERLCD_LOG_LEVEL`. Periodic status traffic (app update loop, HMI print-status polls) is excluded, so the trace maps screen elements to their exact command flow.
+
 ## 2026-07-08
 
 ### Fixed

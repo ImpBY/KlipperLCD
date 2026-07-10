@@ -136,10 +136,13 @@ Key variables:
 - `KLIPPERLCD_UPDATE_INTERVAL`
 - `KLIPPERLCD_LOG_LEVEL`
 - `KLIPPERLCD_FILAMENT_SENSOR_NAME` (Klipper filament sensor name for the HMI runout-sensor toggle; default `filament_runout_sensor`)
+- `KLIPPERLCD_HMI_TRACE` (set to `1` to record every HMI touch input and the commands it triggers into a standalone trace file; default `0`)
+- `KLIPPERLCD_HMI_TRACE_FILE` (trace file path; default `~/printer_data/logs/KlipperLCD_hmi_trace.log`)
 
 Notes:
 - Moonraker is reached at `http://<KLIPPERLCD_MOONRAKER_URL>:<KLIPPERLCD_MOONRAKER_PORT>`; adjust the port if your Moonraker listens on a non-default one (e.g. `7125`).
 - Keep `KLIPPERLCD_API_KEY` synchronized with your Moonraker API key.
+- The HMI trace file stays free of periodic status traffic: it records each touch input (`RX` lines with the element label) followed by the LCD writes (`TX`), dispatched events (`EVENT`), and Moonraker/Klippy calls (`REST`, `KLIPPY`) issued while handling it. Unknown inputs are logged as `RX?` — useful for reverse-engineering HMI elements.
 
 ### 5. Install and enable systemd service
 ```bash

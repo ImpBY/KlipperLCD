@@ -3,6 +3,8 @@
 import logging
 import os
 
+from . import hmi_trace
+
 
 def setup_logging():
     """Configure root logger from environment."""
@@ -24,3 +26,5 @@ def setup_logging():
             raw_level,
         )
     logger.info("Logging initialized with level %s", logging.getLevelName(level))
+
+    hmi_trace.setup()

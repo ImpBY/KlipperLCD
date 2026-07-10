@@ -22,26 +22,24 @@ def test_main_abort_print_emits_print_stop():
     assert events == [(lcd.evt.PRINT_STOP, None)]
 
 
-def test_advanced_settings_page_reflects_recovery_state():
+def test_advanced_settings_page_opens_multiset():
     lcd, _, writes = _build_lcd()
-    lcd.power_loss_recovery_enabled = False
 
     lcd._SettingScreen([0x0D])
 
-    assert "multiset.plrbutton.val=0" in writes
+    # Resume Printing toggle was removed: no plrbutton write, just the page.
+    assert not any("plrbutton" in w for w in writes)
     assert "page multiset" in writes
 
 
-def test_power_continue_updates_recovery_flag():
+def test_power_continue_legacy_input_is_noop():
     lcd, _, writes = _build_lcd()
-    lcd.power_loss_recovery_enabled = False
 
     lcd._PowerContinuePrint([0x01])
     lcd._PowerContinuePrint([0x00])
 
-    assert lcd.power_loss_recovery_enabled is False
-    assert "multiset.plrbutton.val=1" in writes
-    assert "multiset.plrbutton.val=0" in writes
+    # Legacy power-loss recovery input is ignored (no writes emitted).
+    assert not any("plrbutton" in w for w in writes)
 
 
 def test_led2_alt_code_toggles_light_at_5_percent():
@@ -97,13 +95,195 @@ def test_settings_filament_sensor_button_requests_toggle():
     assert events == [(lcd.evt.FILAMENT_SENSOR, None)]
 
 
-def test_settings_leveling_button_emits_bed_mesh_event():
+def test_settings_leveling_button_starts_scan_and_blocks_ui():
     lcd, events, writes = _build_lcd()
 
     lcd._SettingScreen([0x01])
 
     assert events == [(lcd.evt.BED_MESH, None)]
+    assert writes[-1] == "page autohome"
+    assert lcd.leveling_active is True
+
+
+def test_setting_back_saves_when_leveling_active():
+    lcd, events, writes = _build_lcd()
+    lcd.leveling_active = True
+
+    lcd._SettingBack([0x01])
+
+    assert events == [(lcd.evt.LEVELING_SAVE, None)]
     assert writes[-1] == "page main"
+    assert lcd.leveling_active is False
+
+
+def test_setting_back_keeps_probe_flow_when_not_leveling():
+    lcd, events, _ = _build_lcd()
+    lcd.probe_mode = True
+
+    lcd._SettingBack([0x01])
+    lcd._SettingBack([0x05])  # generic back, handled by the HMI itself
+
+    assert events == [(lcd.evt.PROBE_BACK, None)]
+    assert lcd.probe_mode is False
+
+
+def test_show_leveling_result_writes_grid_and_page():
+    lcd, _, writes = _build_lcd()
+    matrix = [[0.01 * (r * 6 + c) for c in range(6)] for r in range(6)]
+
+    lcd.show_leveling_result(matrix)
+
+    assert "leveldata_36.x0.val=0" in writes
+    assert "leveldata_36.x7.val=7" in writes
+    assert "leveldata_36.x35.val=35" in writes
+    assert writes[-1] == "page leveldata_36"
+
+
+def test_show_leveling_result_aborts_on_wrong_size():
+    lcd, _, writes = _build_lcd()
+    lcd.leveling_active = True
+
+    lcd.show_leveling_result([[0.0, 1.0], [1.0, 2.0]])
+
+    assert writes[-1] == "page main"
+    assert lcd.leveling_active is False
+
+
+def test_settings_page_open_syncs_toggle_indicators():
+    lcd, _, writes = _build_lcd()
+    lcd.printer.led = 5
+    lcd.printer.fan = 0
+    lcd.printer.filament_sensor = True
+
+    lcd._SettingScreen([0x0B])
+
+    assert "status_led2=1" in writes
+    assert "set.fanstatue.pic=76" in writes
+    assert "set.filamentdec.pic=77" in writes
+    # The page switch is local on the HMI; the host must not re-send it.
+    assert "page set" not in writes
+    assert lcd.light is True
+    assert lcd.filament_sensor_enabled is True
+
+
+def test_settings_page_open_falls_back_to_local_sensor_state():
+    lcd, _, writes = _build_lcd()
+    lcd.printer.led = None
+    lcd.printer.fan = None
+    lcd.printer.filament_sensor = None
+    lcd.filament_sensor_enabled = False
+
+    lcd._SettingScreen([0x0B])
+
+    assert "status_led2=0" in writes
+    assert "set.fanstatue.pic=76" in writes
+    assert "set.filamentdec.pic=76" in writes
+
+
+def test_settings_fan_toggle_updates_indicator():
+    lcd, _, writes = _build_lcd()
+    lcd.printer.fan = 0
+
+    lcd._SettingScreen([0x07])
+    assert "set.fanstatue.pic=77" in writes
+
+    lcd._SettingScreen([0x07])
+    assert "set.fanstatue.pic=76" in writes
+
+
+def test_settings_filament_toggle_uses_callback_result():
+    events = []
+    writes = []
+
+    def callback(evt, data=None):
+        events.append((evt, data))
+        return False  # app reports the new sensor state
+
+    lcd = LCD(callback=callback)
+    lcd.write = lambda data, eol=True, lf=False: writes.append(data)
+
+    lcd._SettingScreen([0x08])
+
+    assert events == [(lcd.evt.FILAMENT_SENSOR, None)]
+    assert lcd.filament_sensor_enabled is False
+    assert "set.filamentdec.pic=76" in writes
+
+
+def test_main_page_new_klipper_buttons_emit_events():
+    lcd, events, _ = _build_lcd()
+
+    lcd._MainPage([0x03])
+    lcd._MainPage([0x04])
+    lcd._MainPage([0x05])
+
+    assert events == [
+        (lcd.evt.CONSOLE_OPEN, None),
+        (lcd.evt.EMERGENCY_STOP, None),
+        (lcd.evt.POWER_OFF, None),
+    ]
+
+
+def test_settings_restart_and_macros_buttons_emit_events():
+    lcd, events, _ = _build_lcd()
+
+    lcd._SettingScreen([0x0E])
+    lcd._SettingScreen([0x0F])
+
+    assert events == [
+        (lcd.evt.KLIPPER_RESTART, None),
+        (lcd.evt.MACROS_OPEN, None),
+    ]
+
+
+def test_zoffset_page_open_syncs_indicators():
+    lcd, _, writes = _build_lcd()
+    lcd.printer.led = 0
+    lcd.printer.filament_sensor = True
+
+    lcd._BedLevelFun([0x20])
+
+    assert "status_led2=0" in writes
+    assert "adjustzoffset.led2.pic=76" in writes
+    assert "adjustzoffset.filamentdec.pic=77" in writes
+
+
+def test_eaxis_step_select_updates_step_and_indicator():
+    lcd, events, writes = _build_lcd()
+    lcd.printer.flowrate = 100
+
+    lcd._FilamentLoad([0x0F])  # step 5
+    assert lcd.eaxis_step == 5
+    assert "motorsetvalue.p1.pic=63" in writes
+
+    lcd._FilamentLoad([0x0D])  # plus by 5
+    assert lcd.eaxis_trim == 5
+    assert events == [(lcd.evt.FLOW, 100.5)]
+
+    lcd._FilamentLoad([0x10])  # step 10
+    assert lcd.eaxis_step == 10
+    assert "motorsetvalue.p1.pic=64" in writes
+    lcd._FilamentLoad([0x0E])  # step 1
+    assert lcd.eaxis_step == 1
+    assert "motorsetvalue.p1.pic=62" in writes
+
+
+def test_eaxis_pulse_trims_flow_in_tenths_of_percent():
+    lcd, events, writes = _build_lcd()
+    lcd.printer.flowrate = 101.5
+
+    lcd._FilamentLoad([0x0B])  # screen open renders current trim
+    assert lcd.eaxis_trim == 15
+    assert "motorsetvalue.eaxis.val=15" in writes
+    assert events == []
+
+    lcd._FilamentLoad([0x0D])  # plus
+    assert lcd.eaxis_trim == 16
+    assert "motorsetvalue.eaxis.val=16" in writes
+    assert events == [(lcd.evt.FLOW, 100 + 16 / 10.0)]
+
+    lcd._FilamentLoad([0x0C])  # minus
+    assert lcd.eaxis_trim == 15
+    assert events[-1] == (lcd.evt.FLOW, 101.5)
 
 
 def test_file_slots_rendered_across_hmi_pages():

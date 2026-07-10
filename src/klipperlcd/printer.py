@@ -19,6 +19,8 @@ import requests
 from json import JSONDecodeError
 from requests.exceptions import ConnectionError, ReadTimeout, RequestException
 
+from . import hmi_trace
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +34,38 @@ def _hex_preview(data, limit=128):
     if len(raw) > limit:
         return "%s...<%d bytes>" % (hexed[: limit * 2], len(raw))
     return "%s<%d bytes>" % (hexed, len(raw))
+
+
+def interpolate_mesh(matrix, rows=6, cols=6):
+    """Bilinear-resample a rectangular mesh matrix to rows x cols."""
+    src_rows = len(matrix)
+    src_cols = len(matrix[0])
+    result = []
+    for r in range(rows):
+        sr = r * (src_rows - 1) / (rows - 1) if rows > 1 else 0.0
+        r0 = min(int(sr), src_rows - 2) if src_rows > 1 else 0
+        fr = sr - r0
+        row = []
+        for c in range(cols):
+            sc = c * (src_cols - 1) / (cols - 1) if cols > 1 else 0.0
+            c0 = min(int(sc), src_cols - 2) if src_cols > 1 else 0
+            fc = sc - c0
+            if src_rows > 1 and src_cols > 1:
+                value = (
+                    matrix[r0][c0] * (1 - fr) * (1 - fc)
+                    + matrix[r0 + 1][c0] * fr * (1 - fc)
+                    + matrix[r0][c0 + 1] * (1 - fr) * fc
+                    + matrix[r0 + 1][c0 + 1] * fr * fc
+                )
+            elif src_cols > 1:
+                value = matrix[r0][c0] * (1 - fc) + matrix[r0][c0 + 1] * fc
+            elif src_rows > 1:
+                value = matrix[r0][c0] * (1 - fr) + matrix[r0 + 1][c0] * fr
+            else:
+                value = matrix[r0][c0]
+            row.append(value)
+        result.append(row)
+    return result
 
 
 # NOTE: This file intentionally preserves legacy naming and field layout because
@@ -244,6 +278,8 @@ class KlippySocket:
 
     def queue_line(self, line):
         # Called by other threads; queue is protected by lock.
+        if hmi_trace.current_label():
+            hmi_trace.trace("KLIPPY", repr(line))
         with self.lock:
             self.lines.append(line)
             if self._socket_trace:
@@ -357,14 +393,20 @@ class PrinterData:
     SHORT_BUILD_VERSION = "1.00"
     CORP_WEBSITE_E = "https://www.klipper3d.org/"
 
-    def __init__(self, API_Key, URL='127.0.0.1', port=80, klippy_sock='/home/pi/printer_data/comms/klippy.sock', callback=None):
+    def __init__(self, API_Key, URL='127.0.0.1', port=80, klippy_sock='/home/pi/printer_data/comms/klippy.sock', callback=None, filament_sensor_name='filament_runout_sensor'):
         # Runtime comms + state mirrors.
         self.response_callback = callback
         self.klippy_sock      = klippy_sock
+        self.filament_sensor_name = filament_sensor_name
         self.BABY_Z_VAR       = 0
         self.print_speed      = 100
         self.flow_percentage  = 100
         self.led_percentage   = 0
+        # Live states mirrored from Klipper for the LCD toggle indicators;
+        # None until the corresponding object is seen in a status query.
+        self.led_brightness   = None
+        self.filament_sensor_enabled_live = None
+        self._status_query    = None
         self.temphot          = 0
         self.tempbed          = 0
         self.HMI_ValueStruct  = HMI_value_t()
@@ -413,6 +455,8 @@ class PrinterData:
 
     # ------------- Klippy socket integration ----------
     def klippy_start(self):
+        # Config may change across restarts; re-detect optional status objects.
+        self._status_query = None
         self.ks = KlippySocket(self.klippy_sock, callback=self.klippy_callback)
         subscribe = {
             "id": 4001,
@@ -543,6 +587,10 @@ class PrinterData:
 
     def getREST(self, path):
         # Thin helper: keep error handling centralized in this module.
+        # Trace only queries issued while handling an HMI input; the
+        # periodic update loop would flood the trace file.
+        if hmi_trace.current_label():
+            hmi_trace.trace("REST", "GET %s" % path)
         url = self.op.base_address + path
         try:
             r = self.op.s.get(url, timeout=self.op.timeout)
@@ -581,8 +629,26 @@ class PrinterData:
             )
 
     def postREST(self, path, json):
+        hmi_trace.trace("REST", "POST %s payload=%r" % (path, json))
         logger.debug("Sending REST command: path=%s payload=%r", path, json)
         self.event_loop.call_soon_threadsafe(asyncio.create_task,self._postREST(path,json))
+
+    def emergency_stop(self):
+        """Immediate M112. Deliberately bypasses the async POST queue: a
+        long-running gcode script POST can block the event loop for seconds,
+        and the emergency stop must not wait behind it."""
+        url = self.op.base_address + '/printer/emergency_stop'
+        hmi_trace.trace("REST", "POST /printer/emergency_stop (direct)")
+        _log("EMERGENCY STOP requested from LCD", level=logging.WARNING)
+        try:
+            requests.post(url, headers=dict(self.op.s.headers), timeout=3)
+        except RequestException as e:
+            _log("Emergency stop POST failed: %s" % e, level=logging.ERROR)
+
+    def host_shutdown(self):
+        """Shut down the printer host (CB1) via Moonraker."""
+        _log("Host shutdown requested from LCD", level=logging.WARNING)
+        self.postREST('/machine/shutdown', None)
 
     def init_Webservices(self):
         # Initialize runtime metadata and printer limits.
@@ -688,6 +754,64 @@ class PrinterData:
             names.append(fl["path"])
         return names
 
+    def _build_status_query(self):
+        """Compose the periodic status query, including optional objects.
+
+        Querying an object Klipper doesn't have makes Moonraker reject the
+        whole request, so LED/filament-sensor objects are added only when
+        present in /printer/objects/list. The result is cached until the
+        next socket (re)connect.
+        """
+        if self._status_query:
+            return self._status_query
+        base = ['extruder', 'heater_bed', 'gcode_move', 'fan', 'print_stats',
+                'virtual_sdcard', 'toolhead']
+        optional = ['led top_LEDs',
+                    'filament_switch_sensor ' + self.filament_sensor_name]
+        objects = []
+        resp = self.getREST('/printer/objects/list')
+        try:
+            available = set(resp['result']['objects'])
+        except (TypeError, KeyError):
+            available = None
+        if available is not None:
+            objects = [name for name in optional if name in available]
+            missing = [name for name in optional if name not in available]
+            if missing:
+                logger.debug("Optional status objects not available: %r", missing)
+        query = '/printer/objects/query?' + '&'.join(
+            name.replace(' ', '%20') for name in base + objects
+        )
+        if available is not None:
+            # Cache only when the object list was actually readable.
+            self._status_query = query
+        return query
+
+    def _update_optional_states(self, data):
+        """Mirror LED brightness and filament-sensor state when present."""
+        led = data.get('led top_LEDs')
+        try:
+            if led and led.get('color_data'):
+                # color_data rows are [R, G, B, W]; this LED is white-only.
+                self.led_brightness = led['color_data'][0][3] * 100
+        except (TypeError, IndexError, KeyError):
+            pass
+        sensor = data.get('filament_switch_sensor ' + self.filament_sensor_name)
+        if sensor and 'enabled' in sensor:
+            self.filament_sensor_enabled_live = bool(sensor['enabled'])
+
+    def get_bed_mesh(self):
+        """Return the active bed mesh probed matrix (rows of Z values), or None."""
+        resp = self.getREST('/printer/objects/query?bed_mesh')
+        try:
+            mesh = resp['result']['status']['bed_mesh']
+            matrix = mesh.get('probed_matrix') or mesh.get('mesh_matrix')
+            if matrix and matrix[0]:
+                return matrix
+        except (TypeError, KeyError, IndexError):
+            pass
+        return None
+
     def klippy_ready(self):
         """Check via Moonraker whether Klippy reached the ready state."""
         info = self.getREST('/printer/info')
@@ -711,12 +835,13 @@ class PrinterData:
             return False
         # Single combined query: virtual_sdcard/print_stats are fetched together
         # with the rest of the state to avoid a second HTTP round-trip per cycle.
-        query = '/printer/objects/query?extruder&heater_bed&gcode_move&fan&print_stats&virtual_sdcard&toolhead'
+        query = self._build_status_query()
         try:
             resp = self.getREST(query)
             if not resp or 'result' not in resp:
                 return False
             data = resp['result']['status']
+            self._update_optional_states(data)
             self.gcm = data['gcode_move']
             self.z_offset = self.gcm['homing_origin'][2] #z offset
             self.flow_percentage = self.gcm['extrude_factor'] * 100 #flow rate percent
@@ -837,8 +962,9 @@ class PrinterData:
         self.sendGCode('M220 S%d' % fr)
 
     def set_flow(self, fl):
+        # Klipper parses S as float, so fractional flow trim (e.g. 101.5) works.
         self.flow_percentage = fl
-        self.sendGCode('M221 S%d' % fl)
+        self.sendGCode('M221 S%g' % fl)
 
     def set_led(self, led):
         # led is brightness in percent (0..100).
